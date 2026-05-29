@@ -1,19 +1,7 @@
-node_modules/
-dist/
 .env
+.venv/
 __pycache__/
 *.pyc
-.venv/
-venv/
-*.egg-info/
-# Uploads
-ai_system_tool/backend/uploads/
-
-# Vite cache
-ai_system_tool/frontend/.vite/
-.vite/
-*.log
+uploads/
+.pytest_cache/
 .DS_Store
-Thumbs.db
-.vscode/
-.idea/
