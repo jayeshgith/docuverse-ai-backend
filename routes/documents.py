@@ -71,8 +71,14 @@ async def upload_document(file: UploadFile = File(...), background_tasks: Backgr
 
 
 def process_document(doc_id: str, file_id: str):
+    print(f"📤 process_document START: doc_id={doc_id}, file_id={file_id}")
     tmp = None
     t_start = time.time()
+    raw_text, extracted_data, confidence_scores = "", {}, {}
+    overall_confidence = 0.0
+    status = "failed"
+    error_message = None
+
     try:
         db = get_db()
         file_doc = db.files.find_one({"_id": ObjectId(file_id)})
@@ -90,52 +96,50 @@ def process_document(doc_id: str, file_id: str):
         t1 = time.time()
         print(f"⏱️ OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
         print(f"📄 OCR snippet: {raw_text[:300]}")
-        
+
         doc = db.documents.find_one({"_id": ObjectId(doc_id)})
-        tenant_id = doc.get("user_id", "default") if doc else "default"
+        # Bug 1 fix: use tenant_id, not user_id
+        tenant_id = doc.get("tenant_id", "default") if doc else "default"
 
         t2 = time.time()
         extracted_data, confidence_scores, overall_confidence = extract_fields(raw_text, tenant_id)
         t3 = time.time()
-        print(f"⏱️ Field extraction took {t3-t2:.1f}s, fields={len(extracted_data)}, status={'completed' if extracted_data else 'failed'}")
         status = "completed" if extracted_data else "failed"
-        error_message = None
+        print(f"⏱️ Field extraction took {t3-t2:.1f}s, fields={len(extracted_data)}, status={status}")
+
     except FileNotFoundError:
-        raw_text = ""
-        extracted_data = {}
-        confidence_scores = {}
-        overall_confidence = 0.0
-        status = "failed"
         error_message = "Tesseract OCR not found. Install Tesseract or set TESSERACT_CMD env var."
+        print(f"❌ {error_message}")
     except Exception as e:
-        raw_text = ""
-        extracted_data = {}
-        confidence_scores = {}
-        overall_confidence = 0.0
-        status = "failed"
         error_message = f"Extraction error: {str(e)}"
+        print(f"❌ {error_message}")
+
     finally:
         t4 = time.time()
-        print(f"⏱️ process_document total: {t4-t_start:.1f}s, status={status}")
         if tmp and os.path.exists(tmp):
-            os.unlink(tmp)
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
 
-    try:
-        db = get_db()
-        db.documents.update_one(
-            {"_id": ObjectId(doc_id)},
-            {"$set": {
-                "status": status,
-                "extracted_data": extracted_data,
-                "confidence_scores": confidence_scores,
-                "overall_confidence": overall_confidence,
-                "raw_text": raw_text,
-                "error_message": error_message,
-                "updated_at": datetime.now(timezone.utc),
-            }}
-        )
-    except Exception:
-        pass
+        # Guaranteed status update — always runs, even if something above failed
+        try:
+            db = get_db()
+            db.documents.update_one(
+                {"_id": ObjectId(doc_id)},
+                {"$set": {
+                    "status": status,
+                    "extracted_data": extracted_data,
+                    "confidence_scores": confidence_scores,
+                    "overall_confidence": overall_confidence,
+                    "raw_text": raw_text,
+                    "error_message": error_message,
+                    "updated_at": datetime.now(timezone.utc),
+                }}
+            )
+            print(f"✅ process_document DONE: doc_id={doc_id}, status={status}, fields={len(extracted_data)}, overall={overall_confidence}, took {t4-t_start:.1f}s")
+        except Exception as e:
+            print(f"❌ Failed to update document status: {e}")
 
 
 @router.get("/documents")

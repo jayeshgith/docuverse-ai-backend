@@ -366,7 +366,7 @@ OCR text from document:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.05, max_tokens=600,
-            timeout=30,
+            timeout=15,
         )
         c = r.choices[0].message.content.strip()
         c = re.sub(r"^```(?:json)?\s*|\s*```$", "", c)
