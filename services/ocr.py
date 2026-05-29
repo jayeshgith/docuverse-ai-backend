@@ -72,7 +72,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
     with open_pdf(pdf_path) as pdf:
         for page in pdf.pages:
             try:
-                img = page.to_image(resolution=200)
+                img = page.to_image(resolution=150)
                 processed = preprocess_image_light(img.original)
                 page_text = pytesseract.image_to_string(processed, config="--psm 3 --oem 3").strip()
                 if not page_text:

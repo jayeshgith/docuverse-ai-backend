@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks, Depends
@@ -71,6 +72,7 @@ async def upload_document(file: UploadFile = File(...), background_tasks: Backgr
 
 def process_document(doc_id: str, file_id: str):
     tmp = None
+    t_start = time.time()
     try:
         db = get_db()
         file_doc = db.files.find_one({"_id": ObjectId(file_id)})
@@ -83,12 +85,18 @@ def process_document(doc_id: str, file_id: str):
             tmp_file.write(content)
             tmp = tmp_file.name
 
+        t0 = time.time()
         raw_text = extract_text(tmp)
+        t1 = time.time()
+        print(f"⏱️ OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
         
         doc = db.documents.find_one({"_id": ObjectId(doc_id)})
         tenant_id = doc.get("user_id", "default") if doc else "default"
-        
+
+        t2 = time.time()
         extracted_data, confidence_scores, overall_confidence = extract_fields(raw_text, tenant_id)
+        t3 = time.time()
+        print(f"⏱️ Field extraction took {t3-t2:.1f}s, fields={len(extracted_data)}, status={'completed' if extracted_data else 'failed'}")
         status = "completed" if extracted_data else "failed"
         error_message = None
     except FileNotFoundError:
@@ -106,6 +114,8 @@ def process_document(doc_id: str, file_id: str):
         status = "failed"
         error_message = f"Extraction error: {str(e)}"
     finally:
+        t4 = time.time()
+        print(f"⏱️ process_document total: {t4-t_start:.1f}s, status={status}")
         if tmp and os.path.exists(tmp):
             os.unlink(tmp)
 
