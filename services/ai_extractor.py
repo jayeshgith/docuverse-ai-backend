@@ -107,6 +107,7 @@ def get_doc_config(doc_type: str, tenant_id: str = "default") -> dict:
 PASSPORT_NUM_RE = r"(?:passport\s*(?:no|number|#|\.)?\s*[:\-]\s*)([A-Z]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9])"
 PAN_RE = r"(?:pan\s*(?:no|number|#|\.|:)?\s*[:\-]\s*)?([A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z]\s*\d\s*\d\s*\d\s*\d\s*[A-Z])"
 AADHAAR_RE = r"(\d{4}\s?\d{4}\s?\d{4})"
+AADHAAR_RE_MULTI = r"(\d{4})\s*(\d{4})\s*(\d{4})"
 NAME_RE = r"(?:name|full name|given name|surname|applicant name|candidate name|student name|holder name)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$|\||email|\d{2}|[0-9])"
 DOB_RE = r"(?:dob|date\s*of\s*birth|birth\s*date|d\.o\.b|date\s*of\s*birth|birth)\s*[:\-]\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
 DATE_RE = r"(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})"
@@ -160,7 +161,7 @@ def detect_document_type(raw_text):
 
     if re.search(PASSPORT_NUM_RE, raw_text):
         return "passport"
-    if re.search(AADHAAR_RE, raw_text):
+    if re.search(AADHAAR_RE, raw_text) or re.search(AADHAAR_RE_MULTI, raw_text):
         return "aadhaar_card"
     return "other"
 
@@ -235,7 +236,14 @@ def extract_fields_rule_based(raw_text, doc_type):
                 fields["dob"] = m.group(1).strip()
 
     elif doc_type == "aadhaar_card":
-        fields["aadhaar_number"] = get(AADHAAR_RE)
+        aadhaar_raw = get(AADHAAR_RE)
+        if not aadhaar_raw:
+            m = re.search(AADHAAR_RE_MULTI, raw_text, re.IGNORECASE | re.DOTALL)
+            if m:
+                aadhaar_raw = f"{m.group(1)} {m.group(2)} {m.group(3)}"
+        if aadhaar_raw:
+            fields["aadhaar_number"] = re.sub(r"\s+", " ", aadhaar_raw)
+
         fields["name"] = get(NAME_RE)
         if not fields.get("name"):
             lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
@@ -244,24 +252,58 @@ def extract_fields_rule_based(raw_text, doc_type):
                     for j in range(i + 1, min(i + 5, len(lines))):
                         candidate = lines[j].strip()
                         if (not re.search(LABEL_EXCLUDE, candidate, re.I)
-                                and re.match(r"^[A-Z][A-Za-z\s.'-]{4,40}$", candidate)
-                                and " " in candidate):
+                                and re.match(r"^[A-Za-z][A-Za-z\s.'-]{2,40}$", candidate)
+                                and not re.match(r"^\d", candidate)):
                             fields["name"] = candidate
                             break
                     break
 
+        if not fields.get("name"):
+            m = re.search(r"(?:aadhaar|uidai|aadhar)\s*\n\s*([A-Za-z\s.'-]+?)\s*\n\s*(?:dob|date|birth|\d{2}/\d{2})", raw_text, re.IGNORECASE)
+            if m:
+                candidate = m.group(1).strip()
+                if not re.search(LABEL_EXCLUDE, candidate, re.I) and len(candidate) >= 3:
+                    fields["name"] = candidate
+
+        if not fields.get("name"):
+            m = re.search(r"(?:name|full name|applicant|holder)\s*[:.\-]?\s*([A-Za-z\s.'-]+?)(?:\n|$)", raw_text, re.IGNORECASE)
+            if m:
+                candidate = m.group(1).strip()
+                if len(candidate) >= 3:
+                    fields["name"] = candidate
+
         fields["dob"] = get(DOB_RE) or get(DATE_RE)
+        if not fields.get("dob"):
+            m = re.search(r"\b(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})\b", raw_text)
+            if m:
+                fields["dob"] = m.group(1).strip()
+
         fields["gender"] = get(GENDER_RE)
         if not fields.get("gender"):
-            m = re.search(r"(?:male|female|M|F)\b", raw_text, re.I)
+            m = re.search(r"\b(Male|Female|MALE|FEMALE|M|F)\b", raw_text)
             if m:
                 fields["gender"] = m.group(0).title()
 
         fields["address"] = get(ADDRESS_RE)
+
         if not fields.get("address"):
-            m = re.search(r"([A-Za-z0-9\s,.\-/#]{10,})", raw_text)
-            if m and len(m.group(1).strip()) > 15:
-                fields["address"] = m.group(1).strip()[:200]
+            lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
+            addr_start = -1
+            for i, line in enumerate(lines):
+                if re.search(r"(add|addr|address|residence|permanent)", line, re.I):
+                    addr_start = i
+                    break
+            if addr_start >= 0:
+                addr_lines = []
+                for j in range(addr_start + 1, min(addr_start + 8, len(lines))):
+                    line = lines[j]
+                    if re.search(r"(mobile|phone|email|aadhaar|uidai)", line, re.I):
+                        break
+                    if len(line) > 5:
+                        addr_lines.append(line)
+                if addr_lines:
+                    fields["address"] = ", ".join(addr_lines)[:200]
+
         fields["mobile_number"] = get(MOBILE_RE) or get(PHONE_RE)
 
     elif doc_type in ("invoice", "bill"):
@@ -363,18 +405,21 @@ def extract_fields(raw_text, tenant_id="default"):
     required = config.get("required_fields", [])
     threshold = config.get("confidence_threshold", 0.78)
 
-    if required and all(rule_fields.get(f) for f in required):
+    if required and all(rule_fields.get(f) for f in required) and len(rule_fields) >= len(required):
         scores = {k: 0.85 for k in rule_fields}
         overall = round(sum(scores.values()) / len(scores), 2) if scores else 0.0
-        if overall >= threshold:
+        if overall >= threshold and overall > 0:
             print(f"⚡ RULES-FIRST SHORT-CIRCUIT: Skipped OpenAI API for {doc_type}!")
             return rule_fields, scores, overall
 
     ai_fields = None
     if client:
         try:
+            print(f"🤖 Calling OpenAI for {doc_type} (rule_fields={len(rule_fields)})...")
             ai_fields = extract_with_openai(raw_text, doc_type, config)
-        except Exception:
+            print(f"🤖 OpenAI returned {len(ai_fields) if ai_fields else 0} fields")
+        except Exception as e:
+            print(f"🤖 OpenAI error: {e}")
             ai_fields = None
 
     merged, scores = {}, {}

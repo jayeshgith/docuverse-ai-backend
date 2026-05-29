@@ -89,6 +89,7 @@ def process_document(doc_id: str, file_id: str):
         raw_text = extract_text(tmp)
         t1 = time.time()
         print(f"⏱️ OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
+        print(f"📄 OCR snippet: {raw_text[:300]}")
         
         doc = db.documents.find_one({"_id": ObjectId(doc_id)})
         tenant_id = doc.get("user_id", "default") if doc else "default"
