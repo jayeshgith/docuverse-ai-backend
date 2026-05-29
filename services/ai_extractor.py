@@ -392,19 +392,28 @@ def extract_fields_rule_based_dynamic(raw_text, config_raw_fields) -> dict:
 
 def extract_fields(raw_text, tenant_id="default"):
     if not raw_text or len(raw_text.strip()) < 5:
+        print("⚠️ extract_fields: text too short, skipping")
         return {}, {}, 0.0
 
     doc_type = detect_document_type(raw_text)
+    print(f"🔍 detect_document_type → {doc_type}")
+
     config = get_doc_config(doc_type, tenant_id)
+    print(f"📋 Config loaded: {len(config.get('fields', []))} fields, {len(config.get('required_fields', []))} required {config.get('required_fields', [])}")
+
     rule_fields = extract_fields_rule_based(raw_text, doc_type)
-    
+    print(f"🎯 Regex matched {len(rule_fields)} fields: {list(rule_fields.keys())}")
+
     if config.get("raw_fields"):
         dynamic_rule_fields = extract_fields_rule_based_dynamic(raw_text, config["raw_fields"])
+        if dynamic_rule_fields:
+            print(f"🎯 Dynamic regex matched {len(dynamic_rule_fields)} extra fields: {list(dynamic_rule_fields.keys())}")
         rule_fields.update(dynamic_rule_fields)
 
     required = config.get("required_fields", [])
     threshold = config.get("confidence_threshold", 0.78)
 
+    # Short-circuit check: if all required fields are captured by regex, skip OpenAI
     if required and all(rule_fields.get(f) for f in required) and len(rule_fields) >= len(required):
         scores = {k: 0.85 for k in rule_fields}
         overall = round(sum(scores.values()) / len(scores), 2) if scores else 0.0
@@ -412,15 +421,21 @@ def extract_fields(raw_text, tenant_id="default"):
             print(f"⚡ RULES-FIRST SHORT-CIRCUIT: Skipped OpenAI API for {doc_type}!")
             return rule_fields, scores, overall
 
+    missing = [f for f in required if not rule_fields.get(f)]
+    if missing:
+        print(f"📝 Missing required fields (need OpenAI): {missing}")
+
     ai_fields = None
     if client:
         try:
-            print(f"🤖 Calling OpenAI for {doc_type} (rule_fields={len(rule_fields)})...")
+            print(f"🤖 Calling OpenAI gpt-4o-mini for {doc_type} (regex got {len(rule_fields)} fields)...")
             ai_fields = extract_with_openai(raw_text, doc_type, config)
             print(f"🤖 OpenAI returned {len(ai_fields) if ai_fields else 0} fields")
         except Exception as e:
-            print(f"🤖 OpenAI error: {e}")
+            print(f"🤖 OpenAI error: {type(e).__name__}: {e}")
             ai_fields = None
+    else:
+        print("⚠️ OpenAI client not configured (no API key). Using regex-only results.")
 
     merged, scores = {}, {}
     keys = set(list(rule_fields.keys()) + (list(ai_fields.keys()) if ai_fields else []))
