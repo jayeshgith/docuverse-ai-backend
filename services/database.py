@@ -20,11 +20,12 @@ def get_db():
         raw_url = os.environ.get("MONGODB_URL", "mongodb://localhost:27017")
         db_name = os.environ.get("DATABASE_NAME", "docuverse")
         url = _build_mongo_url(raw_url)
-        _mongo_client = MongoClient(
-            url,
-            connectTimeoutMS=20000,
-            serverSelectionTimeoutMS=30000,
-            tls=True,
-            tlsAllowInvalidCertificates=True,
-        )
+        kwargs = {
+            "connectTimeoutMS": 20000,
+            "serverSelectionTimeoutMS": 30000,
+        }
+        if raw_url.startswith("mongodb+srv://"):
+            kwargs["tls"] = True
+            kwargs["tlsAllowInvalidCertificates"] = True
+        _mongo_client = MongoClient(url, **kwargs)
     return _mongo_client[os.environ.get("DATABASE_NAME", "docuverse")]
