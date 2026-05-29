@@ -84,7 +84,11 @@ def process_document(doc_id: str, file_id: str):
             tmp = tmp_file.name
 
         raw_text = extract_text(tmp)
-        extracted_data, confidence_scores, overall_confidence = extract_fields(raw_text)
+        
+        doc = db.documents.find_one({"_id": ObjectId(doc_id)})
+        tenant_id = doc.get("user_id", "default") if doc else "default"
+        
+        extracted_data, confidence_scores, overall_confidence = extract_fields(raw_text, tenant_id)
         status = "completed" if extracted_data else "failed"
         error_message = None
     except FileNotFoundError:

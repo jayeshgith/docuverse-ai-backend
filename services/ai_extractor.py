@@ -55,17 +55,43 @@ HARDCODED_CONFIGS: dict[str, dict] = {
 }
 
 
-def get_doc_config(doc_type: str) -> dict:
+def get_doc_config(doc_type: str, tenant_id: str = "default") -> dict:
     try:
         db = get_db()
-        cfg = db.document_configs.find_one({"doc_type": doc_type, "enabled": True})
+        cfg = db.document_configs.find_one({
+            "document_type": doc_type.lower(),
+            "tenant_id": tenant_id.lower()
+        })
+        if not cfg and tenant_id.lower() != "default":
+            cfg = db.document_configs.find_one({
+                "document_type": doc_type.lower(),
+                "tenant_id": "default"
+            })
+        if not cfg:
+            cfg = db.document_configs.find_one({"doc_type": doc_type.lower(), "enabled": True})
+            
         if cfg:
-            return {
-                "fields": cfg.get("fields", HARDCODED_CONFIGS[doc_type]["fields"] if doc_type in HARDCODED_CONFIGS else HARDCODED_CONFIGS["other"]["fields"]),
-                "required_fields": cfg.get("required_fields", []),
-                "llm_hint": cfg.get("llm_hint", ""),
-                "confidence_threshold": cfg.get("confidence_threshold", 0.78),
-            }
+            fields_raw = cfg.get("fields", [])
+            if fields_raw and isinstance(fields_raw[0], dict):
+                fields_keys = [f["key"] for f in fields_raw]
+                required = [f["key"] for f in fields_raw if f.get("is_required", True)]
+                desc_str = ", ".join(f"'{f['key']}' ({f['description']})" for f in fields_raw)
+                llm_hint = f"Extract details for {cfg.get('display_name', doc_type)}. Look for: {desc_str}."
+                return {
+                    "fields": fields_keys,
+                    "required_fields": required,
+                    "llm_hint": llm_hint,
+                    "confidence_threshold": cfg.get("confidence_threshold", 0.78),
+                    "raw_fields": fields_raw
+                }
+            else:
+                return {
+                    "fields": fields_raw,
+                    "required_fields": cfg.get("required_fields", []),
+                    "llm_hint": cfg.get("llm_hint", ""),
+                    "confidence_threshold": cfg.get("confidence_threshold", 0.78),
+                    "raw_fields": []
+                }
     except Exception:
         pass
 
@@ -75,6 +101,7 @@ def get_doc_config(doc_type: str) -> dict:
         "required_fields": fallback["required_fields"],
         "llm_hint": fallback["llm_hint"],
         "confidence_threshold": fallback["confidence_threshold"],
+        "raw_fields": []
     }
 
 PASSPORT_NUM_RE = r"(?:passport\s*(?:no|number|#|\.)?\s*[:\-]\s*)([A-Z]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9])"
@@ -305,13 +332,32 @@ OCR text from document:
         return None
 
 
-def extract_fields(raw_text):
+def extract_fields_rule_based_dynamic(raw_text, config_raw_fields) -> dict:
+    fields = {}
+    for f in config_raw_fields:
+        key = f.get("key")
+        pattern = f.get("regex_pattern")
+        if key and pattern:
+            try:
+                m = re.search(pattern, raw_text, re.IGNORECASE | re.MULTILINE)
+                if m:
+                    fields[key] = m.group(1).strip() if m.groups() else m.group(0).strip()
+            except Exception:
+                pass
+    return fields
+
+
+def extract_fields(raw_text, tenant_id="default"):
     if not raw_text or len(raw_text.strip()) < 5:
         return {}, {}, 0.0
 
     doc_type = detect_document_type(raw_text)
-    config = get_doc_config(doc_type)
+    config = get_doc_config(doc_type, tenant_id)
     rule_fields = extract_fields_rule_based(raw_text, doc_type)
+    
+    if config.get("raw_fields"):
+        dynamic_rule_fields = extract_fields_rule_based_dynamic(raw_text, config["raw_fields"])
+        rule_fields.update(dynamic_rule_fields)
 
     required = config.get("required_fields", [])
     threshold = config.get("confidence_threshold", 0.78)
@@ -320,6 +366,7 @@ def extract_fields(raw_text):
         scores = {k: 0.85 for k in rule_fields}
         overall = round(sum(scores.values()) / len(scores), 2) if scores else 0.0
         if overall >= threshold:
+            print(f"⚡ RULES-FIRST SHORT-CIRCUIT: Skipped OpenAI API for {doc_type}!")
             return rule_fields, scores, overall
 
     ai_fields = None
