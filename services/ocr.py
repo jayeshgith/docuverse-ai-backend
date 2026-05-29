@@ -1,4 +1,5 @@
 import os
+import concurrent.futures
 from pathlib import Path
 import pytesseract
 from pdfplumber import open as open_pdf
@@ -45,13 +46,25 @@ def extract_text_from_image(image_path: str) -> str:
         image = image.resize((image.width * scale, image.height * scale), Image.LANCZOS)
 
     processed = preprocess_image_light(image)
-    text = pytesseract.image_to_string(processed, config="--psm 3 --oem 3").strip()
+    text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
     if text:
         return text
 
     processed = preprocess_image_aggressive(image)
-    text = pytesseract.image_to_string(processed, config="--psm 6 --oem 3").strip()
+    text = pytesseract.image_to_string(processed, config="--psm 6 --oem 1").strip()
     return text
+
+
+def _ocr_pil_image(pil_image):
+    try:
+        processed = preprocess_image_light(pil_image)
+        page_text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
+        if not page_text:
+            processed = preprocess_image_aggressive(pil_image)
+            page_text = pytesseract.image_to_string(processed, config="--psm 6 --oem 1").strip()
+        return page_text
+    except Exception:
+        return ""
 
 
 def extract_text_from_pdf(pdf_path: str) -> str:
@@ -70,18 +83,21 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return ""
 
     with open_pdf(pdf_path) as pdf:
-        for page in pdf.pages:
-            try:
-                img = page.to_image(resolution=150)
-                processed = preprocess_image_light(img.original)
-                page_text = pytesseract.image_to_string(processed, config="--psm 3 --oem 3").strip()
-                if not page_text:
-                    processed = preprocess_image_aggressive(img.original)
-                    page_text = pytesseract.image_to_string(processed, config="--psm 6 --oem 3").strip()
-                if page_text:
-                    text_parts.append(page_text)
-            except Exception:
-                pass
+        page_images = [page.to_image(resolution=150).original for page in pdf.pages]
+
+    text_parts = []
+    workers = min(4, len(page_images)) if len(page_images) > 1 else 1
+    if workers > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            results = pool.map(_ocr_pil_image, page_images)
+            for text in results:
+                if text:
+                    text_parts.append(text)
+    else:
+        for img in page_images:
+            text = _ocr_pil_image(img)
+            if text:
+                text_parts.append(text)
 
     return "\n".join(text_parts).strip()
 
