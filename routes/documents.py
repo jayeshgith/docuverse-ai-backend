@@ -3,13 +3,16 @@ import tempfile
 import time
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import List
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks, Depends
 from bson import ObjectId
 
 from services.database import get_db
 from services.ocr import extract_text
 from services.ai_extractor import extract_fields
-from routes.auth import get_current_user
+from services.redis_pool import get_redis_pool, redis_available
+from services.task_queue import process_document_job
+from routes.auth import get_current_user, get_current_tenant
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -23,7 +26,12 @@ MAX_SIZE = 10 * 1024 * 1024
 
 
 @router.post("/upload")
-async def upload_document(file: UploadFile = File(...), background_tasks: BackgroundTasks = None, user_email: str = Depends(get_current_user)):
+async def upload_document(
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    user_email: str = Depends(get_current_user),
+    tenant_id: str = Depends(get_current_tenant),
+):
     if file.content_type not in ALLOWED_TYPES:
         raise HTTPException(
             status_code=400,
@@ -47,6 +55,7 @@ async def upload_document(file: UploadFile = File(...), background_tasks: Backgr
 
     doc = {
         "user_id": user_email,
+        "tenant_id": tenant_id.lower(),
         "original_name": file.filename,
         "file_path": file_url,
         "file_type": file.content_type,
@@ -64,14 +73,24 @@ async def upload_document(file: UploadFile = File(...), background_tasks: Backgr
     result = db.documents.insert_one(doc)
     doc["_id"] = str(result.inserted_id)
 
-    if background_tasks:
-        background_tasks.add_task(process_document, doc["_id"], file_id)
+    if redis_available():
+        try:
+            pool = await get_redis_pool()
+            if pool:
+                await pool.enqueue_job("process_document_job", doc["_id"], file_id, tenant_id.lower())
+                print(f"[INFO] Enqueued ARQ job for doc {doc['_id']}")
+        except Exception as e:
+            print(f"[WARN] ARQ enqueue failed, falling back to BackgroundTasks: {e}")
+            if background_tasks:
+                background_tasks.add_task(process_document, doc["_id"], file_id, tenant_id.lower())
+    elif background_tasks:
+        background_tasks.add_task(process_document, doc["_id"], file_id, tenant_id.lower())
 
     return doc
 
 
-def process_document(doc_id: str, file_id: str):
-    """Background task: OCR → Regex → (optional) OpenAI → save results."""
+def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
+    """Background task: OCR -> Regex -> (optional) OpenAI -> save results."""
     tmp = None
     t_start = time.time()
     raw_text = ""
@@ -82,9 +101,8 @@ def process_document(doc_id: str, file_id: str):
     error_message = None
 
     print(f"\n{'='*60}")
-    print(f"[START] process_document: doc_id={doc_id}, file_id={file_id}")
+    print(f"[START] process_document: doc_id={doc_id}, file_id={file_id}, tenant={tenant_id}")
 
-    # Mark 'processing' immediately so we can verify the task started
     try:
         db_mark = get_db()
         db_mark.documents.update_one(
@@ -110,7 +128,6 @@ def process_document(doc_id: str, file_id: str):
             tmp_file.write(content)
             tmp = tmp_file.name
 
-        # --- Step 1: OCR ---
         t0 = time.time()
         raw_text = extract_text(tmp)
         t1 = time.time()
@@ -122,12 +139,6 @@ def process_document(doc_id: str, file_id: str):
             return
 
         print(f"[INFO] OCR snippet: {raw_text[:300]}")
-
-        # --- Step 2: Field Extraction ---
-        # Use "default" tenant until multi-tenant user registration is built
-        doc = db.documents.find_one({"_id": ObjectId(doc_id)})
-        tenant_id = doc.get("tenant_id", "default") if doc else "default"
-        print(f"[INFO] Using tenant_id: {tenant_id}")
 
         t2 = time.time()
         extracted_data, confidence_scores, overall_confidence = extract_fields(raw_text, tenant_id)
@@ -150,14 +161,12 @@ def process_document(doc_id: str, file_id: str):
         traceback.print_exc()
 
     finally:
-        # Clean up temp file
         if tmp and os.path.exists(tmp):
             try:
                 os.unlink(tmp)
             except Exception:
                 pass
 
-        # GUARANTEED status update — this MUST always run
         elapsed = time.time() - t_start
         print(f"[TIME] process_document total: {elapsed:.1f}s, status={status}")
         try:
@@ -182,9 +191,14 @@ def process_document(doc_id: str, file_id: str):
 
 
 @router.get("/documents")
-async def list_documents(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=50), user_email: str = Depends(get_current_user)):
+async def list_documents(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=50),
+    user_email: str = Depends(get_current_user),
+    tenant_id: str = Depends(get_current_tenant),
+):
     db = get_db()
-    query = {"user_id": user_email}
+    query = {"user_id": user_email, "tenant_id": tenant_id.lower()}
     total = db.documents.count_documents(query)
     total_pages = max(1, (total + limit - 1) // limit)
 
@@ -209,10 +223,14 @@ async def list_documents(page: int = Query(1, ge=1), limit: int = Query(10, ge=1
 
 
 @router.get("/documents/{doc_id}")
-async def get_document(doc_id: str, user_email: str = Depends(get_current_user)):
+async def get_document(
+    doc_id: str,
+    user_email: str = Depends(get_current_user),
+    tenant_id: str = Depends(get_current_tenant),
+):
     db = get_db()
     try:
-        doc = db.documents.find_one({"_id": ObjectId(doc_id), "user_id": user_email})
+        doc = db.documents.find_one({"_id": ObjectId(doc_id), "user_id": user_email, "tenant_id": tenant_id.lower()})
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
@@ -224,14 +242,19 @@ async def get_document(doc_id: str, user_email: str = Depends(get_current_user))
 
 
 @router.put("/documents/{doc_id}")
-async def update_document(doc_id: str, data: dict, user_email: str = Depends(get_current_user)):
+async def update_document(
+    doc_id: str,
+    data: dict,
+    user_email: str = Depends(get_current_user),
+    tenant_id: str = Depends(get_current_tenant),
+):
     db = get_db()
     try:
         obj_id = ObjectId(doc_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
-    existing = db.documents.find_one({"_id": obj_id, "user_id": user_email})
+    existing = db.documents.find_one({"_id": obj_id, "user_id": user_email, "tenant_id": tenant_id.lower()})
     if not existing:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -251,14 +274,18 @@ async def update_document(doc_id: str, data: dict, user_email: str = Depends(get
 
 
 @router.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str, user_email: str = Depends(get_current_user)):
+async def delete_document(
+    doc_id: str,
+    user_email: str = Depends(get_current_user),
+    tenant_id: str = Depends(get_current_tenant),
+):
     db = get_db()
     try:
         obj_id = ObjectId(doc_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid document ID")
 
-    doc = db.documents.find_one({"_id": obj_id, "user_id": user_email})
+    doc = db.documents.find_one({"_id": obj_id, "user_id": user_email, "tenant_id": tenant_id.lower()})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -272,3 +299,65 @@ async def delete_document(doc_id: str, user_email: str = Depends(get_current_use
     db.documents.delete_one({"_id": obj_id})
 
     return {"message": "Document deleted successfully"}
+
+
+@router.post("/upload/bulk")
+async def upload_bulk_documents(
+    files: List[UploadFile] = File(...),
+    background_tasks: BackgroundTasks = None,
+    user_email: str = Depends(get_current_user),
+    tenant_id: str = Depends(get_current_tenant),
+):
+    results = []
+    for file in files:
+        if file.content_type not in ALLOWED_TYPES:
+            results.append({"filename": file.filename, "status": "rejected", "error": "Unsupported file type"})
+            continue
+        content = await file.read()
+        if len(content) > MAX_SIZE:
+            results.append({"filename": file.filename, "status": "rejected", "error": "File too large (max 10MB)"})
+            continue
+
+        db = get_db()
+        file_doc = {
+            "data": content,
+            "content_type": file.content_type,
+            "filename": file.filename,
+            "uploaded_at": datetime.now(timezone.utc),
+        }
+        file_result = db.files.insert_one(file_doc)
+        file_id = str(file_result.inserted_id)
+
+        doc = {
+            "user_id": user_email,
+            "tenant_id": tenant_id.lower(),
+            "original_name": file.filename,
+            "file_path": f"/files/{file_id}",
+            "file_type": file.content_type,
+            "file_size": len(content),
+            "status": "queued",
+            "extracted_data": {},
+            "confidence_scores": {},
+            "overall_confidence": 0.0,
+            "raw_text": "",
+            "error_message": None,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        doc_result = db.documents.insert_one(doc)
+        doc_id = str(doc_result.inserted_id)
+
+        if redis_available():
+            try:
+                pool = await get_redis_pool()
+                if pool:
+                    await pool.enqueue_job("process_document_job", doc_id, file_id, tenant_id.lower())
+            except Exception:
+                if background_tasks:
+                    background_tasks.add_task(process_document, doc_id, file_id, tenant_id.lower())
+        elif background_tasks:
+            background_tasks.add_task(process_document, doc_id, file_id, tenant_id.lower())
+
+        results.append({"filename": file.filename, "doc_id": doc_id, "status": "queued"})
+
+    return {"results": results, "total": len(results)}

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import BackgroundTasks
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 from services.auth_service import hash_password, verify_password, create_access_token, decode_access_token
 from services.database import get_db
@@ -39,20 +39,33 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     return payload["sub"]
 
 
+def get_current_tenant(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_access_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return payload.get("tenant_id", "default")
+
+
 @router.post("/signup")
 async def signup(body: SignupRequest):
     db = get_db()
     existing = db.users.find_one({"email": body.email.lower()})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
+
+    tenant_id = body.email.lower().replace("@", "_at_").replace(".", "_dot_")
+
     user = {
         "email": body.email.lower(),
         "name": body.name,
         "hashed_password": hash_password(body.password),
+        "tenant_id": tenant_id,
     }
     db.users.insert_one(user)
-    token = create_access_token({"sub": body.email.lower()})
-    return {"token": token, "user": {"email": user["email"], "name": user["name"]}}
+    token = create_access_token({"sub": body.email.lower(), "tenant_id": tenant_id})
+    return {"token": token, "user": {"email": user["email"], "name": user["name"]}, "tenant_id": tenant_id}
 
 
 @router.post("/login")
@@ -61,8 +74,10 @@ async def login(body: LoginRequest):
     user = db.users.find_one({"email": body.email.lower()})
     if not user or not verify_password(body.password, user["hashed_password"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    token = create_access_token({"sub": user["email"]})
-    return {"token": token, "user": {"email": user["email"], "name": user["name"]}}
+
+    tenant_id = user.get("tenant_id", "default")
+    token = create_access_token({"sub": user["email"], "tenant_id": tenant_id})
+    return {"token": token, "user": {"email": user["email"], "name": user["name"]}, "tenant_id": tenant_id}
 
 
 @router.get("/me")
@@ -71,7 +86,7 @@ async def get_me(email: str = Depends(get_current_user)):
     user = db.users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"email": user["email"], "name": user["name"]}
+    return {"email": user["email"], "name": user["name"], "tenant_id": user.get("tenant_id", "default")}
 
 
 @router.post("/forgot-password")
