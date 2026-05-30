@@ -7,8 +7,9 @@ _pool = None
 async def get_redis_pool():
     global _pool
     if _pool is None and REDIS_URL:
-        from arq import create_pool
-        _pool = await create_pool(REDIS_URL)
+        from arq.connections import RedisSettings, create_pool
+        settings = RedisSettings.from_dsn(REDIS_URL)
+        _pool = await create_pool(settings)
     return _pool
 
 
