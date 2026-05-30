@@ -82,7 +82,7 @@ def process_document(doc_id: str, file_id: str):
     error_message = None
 
     print(f"\n{'='*60}")
-    print(f"📤 process_document START: doc_id={doc_id}, file_id={file_id}")
+    print(f"[START] process_document: doc_id={doc_id}, file_id={file_id}")
 
     # Mark 'processing' immediately so we can verify the task started
     try:
@@ -91,19 +91,19 @@ def process_document(doc_id: str, file_id: str):
             {"_id": ObjectId(doc_id)},
             {"$set": {"status": "processing", "updated_at": datetime.now(timezone.utc)}}
         )
-        print("📤 Task started marker saved to DB")
+        print("[INFO] Task started marker saved to DB")
     except Exception as e:
-        print(f"⚠️ Could not write start marker: {e}")
+        print(f"[WARN] Could not write start marker: {e}")
 
     try:
         db = get_db()
         file_doc = db.files.find_one({"_id": ObjectId(file_id)})
         if not file_doc:
             error_message = "File not found in database"
-            print(f"❌ {error_message}")
+            print(f"[ERROR] {error_message}")
             return
         content = file_doc["data"]
-        print(f"📦 File loaded: {file_doc.get('filename', '?')}, size={len(content)} bytes")
+        print(f"[INFO] File loaded: {file_doc.get('filename', '?')}, size={len(content)} bytes")
 
         ext = Path(file_doc.get("filename", "file.tmp")).suffix or ".tmp"
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
@@ -114,38 +114,38 @@ def process_document(doc_id: str, file_id: str):
         t0 = time.time()
         raw_text = extract_text(tmp)
         t1 = time.time()
-        print(f"⏱️ OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
+        print(f"[TIME] OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
 
         if not raw_text or len(raw_text.strip()) < 10:
             error_message = "OCR could not extract readable text. The document may be a scanned image — ensure Tesseract OCR is installed."
-            print(f"⚠️ OCR returned empty/short text: '{raw_text[:100]}'")
+            print(f"[WARN] OCR returned empty/short text: '{raw_text[:100]}'")
             return
 
-        print(f"📄 OCR snippet: {raw_text[:300]}")
+        print(f"[INFO] OCR snippet: {raw_text[:300]}")
 
         # --- Step 2: Field Extraction ---
         # Use "default" tenant until multi-tenant user registration is built
         doc = db.documents.find_one({"_id": ObjectId(doc_id)})
         tenant_id = doc.get("tenant_id", "default") if doc else "default"
-        print(f"🏢 Using tenant_id: {tenant_id}")
+        print(f"[INFO] Using tenant_id: {tenant_id}")
 
         t2 = time.time()
         extracted_data, confidence_scores, overall_confidence = extract_fields(raw_text, tenant_id)
         t3 = time.time()
-        print(f"⏱️ Field extraction took {t3-t2:.1f}s, fields={len(extracted_data)}")
+        print(f"[TIME] Field extraction took {t3-t2:.1f}s, fields={len(extracted_data)}")
 
         if extracted_data:
             status = "completed"
-            print(f"✅ Extracted fields: {list(extracted_data.keys())}")
+            print(f"[SUCCESS] Extracted fields: {list(extracted_data.keys())}")
         else:
             status = "failed"
             error_message = "No fields could be extracted from the document text."
-            print(f"⚠️ No fields extracted from text of length {len(raw_text)}")
+            print(f"[WARN] No fields extracted from text of length {len(raw_text)}")
 
     except Exception as e:
         status = "failed"
         error_message = f"Extraction error: {str(e)}"
-        print(f"❌ Exception in process_document: {type(e).__name__}: {e}")
+        print(f"[ERROR] Exception in process_document: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
 
@@ -159,7 +159,7 @@ def process_document(doc_id: str, file_id: str):
 
         # GUARANTEED status update — this MUST always run
         elapsed = time.time() - t_start
-        print(f"⏱️ process_document total: {elapsed:.1f}s, status={status}")
+        print(f"[TIME] process_document total: {elapsed:.1f}s, status={status}")
         try:
             db = get_db()
             db.documents.update_one(
@@ -174,9 +174,9 @@ def process_document(doc_id: str, file_id: str):
                     "updated_at": datetime.now(timezone.utc),
                 }}
             )
-            print(f"💾 Document status saved: {status}")
+            print(f"[INFO] Document status saved: {status}")
         except Exception as db_err:
-            print(f"❌ CRITICAL: Failed to save document status: {db_err}")
+            print(f"[ERROR] CRITICAL: Failed to save document status: {db_err}")
 
         print(f"{'='*60}\n")
 
