@@ -7,6 +7,7 @@ or
 """
 
 import os
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,7 +28,15 @@ if __name__ == "__main__":
     from arq.worker import Worker
 
     async def main():
-        settings = RedisSettings.from_dsn(REDIS_URL)
+        if REDIS_URL.startswith(("redis://", "rediss://", "unix://")):
+            settings = RedisSettings.from_dsn(REDIS_URL)
+        else:
+            parsed = urlparse(REDIS_URL)
+            host = parsed.hostname or "localhost"
+            port = parsed.port or 6379
+            password = parsed.password or None
+            settings = RedisSettings(host=host, port=port, password=password)
+
         redis = await create_pool(settings)
         worker = Worker(redis, functions=[process_document_job])
         print(f"[WORKER] ARQ worker started — connected to {REDIS_URL}")

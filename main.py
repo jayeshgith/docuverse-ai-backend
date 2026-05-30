@@ -151,8 +151,12 @@ seed_default_configs()
 async def startup():
     from services.redis_pool import get_redis_pool, redis_available
     if redis_available():
-        await get_redis_pool()
-        print("[INFO] Redis pool created")
+        try:
+            await get_redis_pool()
+            print("[INFO] Redis pool created")
+        except Exception as e:
+            print(f"[WARN] Redis connection failed: {e}")
+            print("[WARN] Background tasks will use BackgroundTasks fallback instead of ARQ")
 
 
 @app.on_event("shutdown")
