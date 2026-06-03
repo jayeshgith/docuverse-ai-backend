@@ -1,12 +1,10 @@
+import json
 import os
 import re
-import json
-from openai import OpenAI
+import urllib.request
 
-client = None
-api_key = os.environ.get("OPENAI_API_KEY")
-if api_key:
-    client = OpenAI(api_key=api_key)
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "phi3:mini")
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
@@ -36,8 +34,7 @@ def chunk_text(text: str) -> list[dict]:
 def score_relevance(chunk_text: str, question: str) -> int:
     q_words = set(re.findall(r"\w+", question.lower()))
     c_words = set(re.findall(r"\w+", chunk_text.lower()))
-    common = q_words & c_words
-    return len(common)
+    return len(q_words & c_words)
 
 
 def find_relevant_chunks(chunks: list[dict], question: str, max_chunks: int = 3) -> list[dict]:
@@ -66,29 +63,29 @@ def ask_question(raw_text: str, extracted_data: dict, question: str, history: li
     context = "\n\n---\n\n".join(c["text"] for c in relevant)
     history_block = build_history_block(history or [])
 
-    system_prompt = "You are a document assistant. Answer based ONLY on the document text provided. Be concise (1-3 sentences). If the answer is not in the document, say 'I could not find that in your document.'"
+    prompt = f"""You are a helpful document assistant for DocuVerse. Answer the user's question based ONLY on the document provided below. Be concise (1-3 sentences). If the answer is not in the document, say "I could not find that in your document."
 
-    user_prompt = f"Document text:\n{context}\n\nExtracted data:\n{extracted_str}"
+Document text:
+{context}
+
+Extracted data:
+{extracted_str}"""
 
     if history_block:
-        user_prompt += f"\n\nRecent conversation:\n{history_block}"
+        prompt += f"\n\nRecent conversation:\n{history_block}"
 
-    user_prompt += f"\n\nQuestion: {question}"
+    prompt += f"\n\nUser question: {question}"
 
-    if not client:
-        return "Chat is unavailable — OpenAI API key not configured."
+    body = json.dumps({
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+    }).encode()
 
     try:
-        r = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=400,
-            timeout=20,
-        )
-        return r.choices[0].message.content.strip()
+        req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+            return data.get("response", "").strip()
     except Exception as e:
         return f"Sorry, I could not process that. Error: {str(e)}"
