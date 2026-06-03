@@ -8,6 +8,8 @@ client = None
 openai_api_key = os.environ.get("OPENAI_API_KEY")
 if openai_api_key:
     client = OpenAI(api_key=openai_api_key)
+else:
+    print("[WARN] OPENAI_API_KEY not set. AI extraction will use regex-only fallback which may miss fields.")
 
 HARDCODED_CONFIGS: dict[str, dict] = {
     "passport": {
