@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from bson import ObjectId
@@ -30,5 +31,27 @@ async def chat_with_document(doc_id: str, body: ChatRequest, user_email: str = D
     if not raw_text and not extracted_data:
         return {"answer": "This document has no extracted text yet. It may still be processing."}
 
-    answer = ask_question(raw_text, extracted_data, body.question)
+    history = list(
+        db.chat_messages.find({"doc_id": doc_id})
+        .sort("created_at", 1)
+        .limit(20)
+    )
+
+    answer = ask_question(raw_text, extracted_data, body.question, history)
+
+    db.chat_messages.insert_one({
+        "doc_id": doc_id,
+        "user_id": user_email,
+        "role": "user",
+        "content": body.question,
+        "created_at": datetime.now(timezone.utc),
+    })
+    db.chat_messages.insert_one({
+        "doc_id": doc_id,
+        "user_id": user_email,
+        "role": "assistant",
+        "content": answer,
+        "created_at": datetime.now(timezone.utc),
+    })
+
     return {"answer": answer}
