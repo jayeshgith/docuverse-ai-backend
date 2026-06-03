@@ -106,37 +106,37 @@ def get_doc_config(doc_type: str, tenant_id: str = "default") -> dict:
         "raw_fields": []
     }
 
-PASSPORT_NUM_RE = r"(?:passport\s*(?:no|number|#|\.)?\s*[:\-]\s*)([A-Z]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9])"
+PASSPORT_NUM_RE = r"(?:passport|pasport|paspOrt|passpOrt)\s*(?:no|number|#|\.)?\s*[:\-]\s*(?:[A-Z]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9]\s*[0-9])"
 PAN_RE = r"(?:pan\s*(?:no|number|#|\.|:)?\s*[:\-]\s*)?([A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z]\s*\d\s*\d\s*\d\s*\d\s*[A-Z])"
 AADHAAR_RE = r"(\d{4}\s?\d{4}\s?\d{4})"
 AADHAAR_RE_MULTI = r"(\d{4})\s*(\d{4})\s*(\d{4})"
-NAME_RE = r"(?:name|full name|given name|surname|applicant name|candidate name|student name|holder name)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$|\||email|\d{2}|[0-9])"
-DOB_RE = r"(?:dob|date\s*of\s*birth|birth\s*date|d\.o\.b|date\s*of\s*birth|birth)\s*[:\-]\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
+NAME_RE = r"(?:name|n a m e|neme|ful|full name|given name|surname|applicant name|candidate name|student name|holder name)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$|\||email|\d{2}|[0-9])"
+DOB_RE = r"(?:dob|d\.o\.b|d\.0\.b|date\s*of\s*birth|birth\s*date|date\s*of\s*birth|birth)\s*[:\-]\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
 DATE_RE = r"(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})"
 EMAIL_RE = r"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"
 PHONE_RE = r"((?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})"
-VENDOR_RE = r"(?:vendor|seller|supplier|store|shop|company|merchant|billed to|bill from)\s*[:\-]\s*([A-Za-z0-9\s\.'\-&]+?)(?:\n|$)"
-TOTAL_RE = r"(?:total|grand total|total amount|amount due|net amount|balance due|sum)\s*[:\-]?\s*[₹$]?\s*([\d,]+\.\d{2})"
-NATIONALITY_RE = r"(?:nationality|citizenship)\s*[:\-]\s*([A-Za-z\s]+?)(?:\n|$|\d)"
-GENDER_RE = r"(?:gender|sex)\s*[:\-]\s*(M|F|Male|Female|MALE|FEMALE)"
-FATHER_RE = r"(?:father|father's name|father name|fathers name)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)"
-ISSUE_RE = r"(?:issue date|date of issue|issued on|date of issuance)\s*[:\-]\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
-EXPIRY_RE = r"(?:expiry date|date of expiry|valid until|expiration date|valid till)\s*[:\-]\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
-ADDRESS_RE = r"(?:address|residence|permanent address)\s*[:\-]\s*([\w\s,\.\-/#]+?)(?:\n{2,}|$)"
+VENDOR_RE = r"(?:vendor|seller|supplier|store|shop|company|merchant|vender|billed to|bill from|biled to)\s*[:\-]\s*([A-Za-z0-9\s\.'\-&]+?)(?:\n|$)"
+TOTAL_RE = r"(?:total|grand total|total amount|amount due|net amount|balance due|sum|tota1|totai)\s*[:\-]?\s*[₹$]?\s*([\d,]+\.\d{2})"
+NATIONALITY_RE = r"(?:nationality|citizenship|nati0nality)\s*[:\-]\s*([A-Za-z\s]+?)(?:\n|$|\d)"
+GENDER_RE = r"(?:gender|sex|gender|sex)\s*[:\-]\s*(M|F|Male|Female|MALE|FEMALE|male|female)"
+FATHER_RE = r"(?:father|father's name|father name|fathers name|f ather|fath er)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)"
+ISSUE_RE = r"(?:issue date|date of issue|issued on|date of issuance|iss ue date)\s*[:\-]\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
+EXPIRY_RE = r"(?:expiry date|date of expiry|valid until|expiration date|valid till|expir y date)\s*[:\-]\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
+ADDRESS_RE = r"(?:address|residence|permanent address|addr ess|add ress|perman ent)\s*[:\-]\s*([\w\s,\.\-/#]+?)(?:\n{2,}|$)"
 INVOICE_RE = r"(?:invoice\s*(?:no|number|#|\.)?\s*[:\-]\s*)([A-Z0-9\-/]+)"
 BILL_RE = r"(?:bill\s*(?:no|number|#|\.)?\s*[:\-]\s*)([A-Z0-9\-/]+)"
 DOC_NUM_RE = r"(?:document\s*(?:no|number|#|\.)?\s*[:\-]\s*)([A-Z0-9\-]+)"
 
-HOLDER_NAME_RE = r"(?:holder\s*(?:name)?|card\s*holder|cardholder|account\s*holder)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)"
+HOLDER_NAME_RE = r"(?:holder\s*(?:name)?|card\s*holder|cardholder|account\s*holder|acc0unt)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)"
 CARD_NUM_RE = r"(?:card\s*(?:no|number|#|\.)?|account\s*(?:no|number|#|\.)?|member\s*(?:no|number)?)\s*[:\-]\s*([A-Z0-9\-/\s]{8,20})"
 ADDRESS_FALLBACK_RE = r"((?:door|street|road|colony|sector|phase|block|house|building|apt|flat|village|city|town|district|state|pincode|pin\s*code)[,\s]*[\w\s,\.\-/#]+(?:\n|$))"
 
-PLACE_OF_BIRTH_RE = r"(?:place\s*of\s*birth|pob|birth\s*place)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)"
+PLACE_OF_BIRTH_RE = r"(?:place\s*of\s*birth|pob|birth\s*place|p l a c e)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)"
 PLACE_OF_ISSUE_RE = r"(?:place\s*of\s*issue|poi|issue\s*place)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)"
-MOBILE_RE = r"(?:mobile|phone|contact|mobile\s*number|phone\s*number|telephone)\s*[:\-]\s*(\+?\d[\d\s\-()]{7,15})"
+MOBILE_RE = r"(?:mobile|phone|contact|mobile\s*number|phone\s*number|telephone|m0bile|ph one)\s*[:\-]\s*(\+?\d[\d\s\-()]{7,15})"
 
 PAN_CLEAN_RE = re.compile(r"[^A-Z0-9]")
-LABEL_EXCLUDE = r"(pan|permanent|account|number|income|tax|govt|india|date|birth|father|mother|signature|name|gender|address|dob|issue|expiry|nationality|phone|email|holder|card|aadhaar|uidai|resident)"
+LABEL_EXCLUDE = r"(pan|permanent|perm anent|account|acc0unt|number|num ber|income|tax|govt|india|date|birth|father|mother|signature|name|gender|address|dob|issue|expiry|nationality|phone|email|holder|card|aadhaar|uidai|resident)"
 SEP_NL = r"\s*[:\-]?\s*\n\s*"
 
 
@@ -145,15 +145,15 @@ def detect_document_type(raw_text):
     score = sum(1 for w in ["resume", "curriculum vitae", "cv", "experience", "skills", "education", "objective"] if w in t)
     if score >= 3:
         return "resume"
-    if any(w in t for w in ["passport", "passport no", "passport number"]):
+    if any(w in t for w in ["passport", "pasport", "pasp0rt", "passp0rt", "passport no", "passport number"]):
         return "passport"
-    if any(w in t for w in ["pan card", "permanent account number", "income tax", "income tax department", "govt of india", "pancard"]):
+    if any(w in t for w in ["pan card", "permanent account number", "perm anent", "income tax", "income tax department", "govt of india", "pancard"]):
         return "pan_card"
-    if any(w in t for w in ["aadhaar", "uidai", "aadhar"]):
+    if any(w in t for w in ["aadhaar", "aadhar", "adh aar", "uidai"]):
         return "aadhaar_card"
-    if any(w in t for w in ["invoice", "tax invoice", "inv no"]):
+    if any(w in t for w in ["invoice", "tax invoice", "invoi ce", "inv no"]):
         return "invoice"
-    if any(w in t for w in ["bill", "receipt", "payment", "total due", "amount due"]):
+    if any(w in t for w in ["bill", "receipt", "recipt", "payment", "total due", "amount due"]):
         return "bill"
 
     cleaned = PAN_CLEAN_RE.sub("", raw_text)

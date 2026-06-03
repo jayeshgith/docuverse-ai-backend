@@ -21,6 +21,18 @@ if os.path.exists(tesseract_cmd):
     tesseract_available = True
 
 
+def correct_orientation(image):
+    try:
+        osd = pytesseract.image_to_osd(image, config="--psm 0 --oem 1")
+        import re as _re
+        angle = int(_re.search(r"Orientation in degrees: (\d+)", osd).group(1))
+        if angle in (90, 180, 270):
+            image = image.rotate(-angle, expand=True, fillcolor=(255, 255, 255))
+    except Exception:
+        pass
+    return image
+
+
 def preprocess_image_light(image):
     image = image.convert("L")
     enhancer = ImageEnhance.Contrast(image)
@@ -41,6 +53,8 @@ def extract_text_from_image(image_path: str) -> str:
         return ""
     image = Image.open(image_path)
 
+    image = correct_orientation(image)
+
     scale = max(1, 1200 // max(image.size))
     if scale > 1:
         image = image.resize((image.width * scale, image.height * scale), Image.LANCZOS)
@@ -57,6 +71,7 @@ def extract_text_from_image(image_path: str) -> str:
 
 def _ocr_pil_image(pil_image):
     try:
+        pil_image = correct_orientation(pil_image)
         processed = preprocess_image_light(pil_image)
         page_text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
         if not page_text:
