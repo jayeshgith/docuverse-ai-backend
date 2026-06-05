@@ -14,6 +14,7 @@ from routes.documents import router as documents_router
 from routes.auth import router as auth_router
 from routes.chat import router as chat_router
 from routes.admin import router as admin_router
+from routes.ws import router as ws_router
 
 
 def seed_default_configs():
@@ -143,6 +144,7 @@ app.include_router(documents_router, prefix="/api")
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
+app.include_router(ws_router)
 
 seed_default_configs()
 
@@ -205,9 +207,19 @@ async def serve_upload_legacy(file_path: str):
 @app.get("/api/health")
 async def health_check():
     from services.ocr import tesseract_available, tesseract_cmd
+    from services.redis_pool import redis_available, _pool
+    from services.database import get_db
+    dlq_count = 0
+    try:
+        dlq_count = get_db().dead_letter_queue.count_documents({})
+    except Exception:
+        pass
     return {
         "status": "ok",
         "service": "DocuVerse API",
         "tesseract_installed": tesseract_available,
         "tesseract_path": tesseract_cmd if os.path.exists(tesseract_cmd) else "not found",
+        "redis_connected": _pool is not None,
+        "redis_configured": redis_available(),
+        "dead_letter_queue_count": dlq_count,
     }

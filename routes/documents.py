@@ -7,12 +7,37 @@ from typing import List
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks, Depends
 from bson import ObjectId
 
+from pathlib import Path as PathLib
+import asyncio
 from services.database import get_db
-from services.ocr import extract_text
+from services.ocr import extract_text, extract_words_from_image
 from services.ai_extractor import extract_fields
 from services.redis_pool import get_redis_pool, redis_available
 from services.task_queue import process_document_job
+from services.progress import publish_sync
 from routes.auth import get_current_user, get_current_tenant
+
+MAX_RETRIES = 3
+DLQ_COLLECTION = "dead_letter_queue"
+
+
+def _move_to_dlq(doc_id: str, file_id: str, tenant_id: str, error_message: str):
+    try:
+        db = get_db()
+        doc = db.documents.find_one({"_id": ObjectId(doc_id)})
+        if doc:
+            dlq_entry = {
+                "doc_id": doc_id,
+                "file_id": file_id,
+                "tenant_id": tenant_id,
+                "original_name": doc.get("original_name", ""),
+                "error_message": error_message,
+                "failed_at": datetime.now(timezone.utc),
+            }
+            db[DLQ_COLLECTION].insert_one(dlq_entry)
+            print(f"[DLQ] Moved doc {doc_id} to dead letter queue")
+    except Exception as e:
+        print(f"[DLQ] Failed to move to DLQ: {e}")
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -90,7 +115,7 @@ async def upload_document(
 
 
 def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
-    """Background task: OCR -> Regex -> (optional) OpenAI -> save results."""
+    """Background task: OCR -> AI -> save results, with DLQ on repeated failure."""
     tmp = None
     t_start = time.time()
     raw_text = ""
@@ -99,13 +124,19 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
     overall_confidence = 0.0
     status = "failed"
     error_message = None
+    ocr_words = []
 
     print(f"\n{'='*60}")
     print(f"[START] process_document: doc_id={doc_id}, file_id={file_id}, tenant={tenant_id}")
 
+    publish_sync(doc_id, {"step": "queued", "message": "Task picked up by background thread"})
+
+    db = get_db()
+    doc_doc = db.documents.find_one({"_id": ObjectId(doc_id)})
+    retry_count = doc_doc.get("retry_count", 0) if doc_doc else 0
+
     try:
-        db_mark = get_db()
-        db_mark.documents.update_one(
+        db.documents.update_one(
             {"_id": ObjectId(doc_id)},
             {"$set": {"status": "processing", "updated_at": datetime.now(timezone.utc)}}
         )
@@ -114,11 +145,11 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
         print(f"[WARN] Could not write start marker: {e}")
 
     try:
-        db = get_db()
         file_doc = db.files.find_one({"_id": ObjectId(file_id)})
         if not file_doc:
             error_message = "File not found in database"
             print(f"[ERROR] {error_message}")
+            publish_sync(doc_id, {"step": "error", "message": error_message, "status": "failed", "payload": {"error_message": error_message}})
             return
         content = file_doc["data"]
         print(f"[INFO] File loaded: {file_doc.get('filename', '?')}, size={len(content)} bytes")
@@ -128,17 +159,30 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
             tmp_file.write(content)
             tmp = tmp_file.name
 
+        publish_sync(doc_id, {"step": "ocr", "message": "Running OCR on document"})
+
         t0 = time.time()
         raw_text = extract_text(tmp)
         t1 = time.time()
         print(f"[TIME] OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
 
+        ext = Path(file_doc.get("filename", "")).suffix.lower()
+        if ext in (".jpg", ".jpeg", ".png", ".webp"):
+            try:
+                ocr_words = extract_words_from_image(tmp)
+                print(f"[INFO] Extracted {len(ocr_words)} word boxes from image")
+            except Exception as we:
+                print(f"[WARN] Could not extract word boxes: {we}")
+
         if not raw_text or len(raw_text.strip()) < 10:
             error_message = "OCR could not extract readable text. The document may be a scanned image — ensure Tesseract OCR is installed."
             print(f"[WARN] OCR returned empty/short text: '{raw_text[:100]}'")
+            publish_sync(doc_id, {"step": "ocr", "message": error_message, "status": "failed", "payload": {"error_message": error_message}})
             return
 
         print(f"[INFO] OCR snippet: {raw_text[:300]}")
+
+        publish_sync(doc_id, {"step": "ai_extraction", "message": "Extracting fields with AI"})
 
         t2 = time.time()
         extracted_data, confidence_scores, overall_confidence = extract_fields(raw_text, tenant_id)
@@ -169,25 +213,106 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
 
         elapsed = time.time() - t_start
         print(f"[TIME] process_document total: {elapsed:.1f}s, status={status}")
-        try:
-            db = get_db()
-            db.documents.update_one(
-                {"_id": ObjectId(doc_id)},
-                {"$set": {
-                    "status": status,
-                    "extracted_data": extracted_data,
-                    "confidence_scores": confidence_scores,
-                    "overall_confidence": overall_confidence,
-                    "raw_text": raw_text,
-                    "error_message": error_message,
-                    "updated_at": datetime.now(timezone.utc),
-                }}
-            )
-            print(f"[INFO] Document status saved: {status}")
-        except Exception as db_err:
-            print(f"[ERROR] CRITICAL: Failed to save document status: {db_err}")
+
+        if status == "failed" and error_message:
+            new_retry = retry_count + 1
+            if new_retry >= MAX_RETRIES:
+                print(f"[DLQ] Doc {doc_id} failed {new_retry} times — moving to DLQ")
+                _move_to_dlq(doc_id, file_id, tenant_id, error_message)
+                publish_sync(doc_id, {"step": "dlq", "message": "Moved to dead letter queue after repeated failures", "status": "failed", "payload": {"error_message": error_message}})
+            else:
+                db.documents.update_one(
+                    {"_id": ObjectId(doc_id)},
+                    {"$set": {
+                        "status": "failed",
+                        "retry_count": new_retry,
+                        "error_message": error_message,
+                        "updated_at": datetime.now(timezone.utc),
+                    }}
+                )
+        else:
+            payload = {
+                "extracted_data": extracted_data,
+                "confidence_scores": confidence_scores,
+                "overall_confidence": overall_confidence,
+                "raw_text": raw_text,
+                "ocr_words": ocr_words,
+            }
+            final_msg = error_message or "Document processed successfully"
+            publish_sync(doc_id, {"step": "done", "message": final_msg, "status": status, "payload": payload})
 
         print(f"{'='*60}\n")
+
+
+@router.get("/documents/stats")
+async def get_document_stats(
+    user_email: str = Depends(get_current_user),
+    tenant_id: str = Depends(get_current_tenant),
+):
+    db = get_db()
+    query = {"user_id": user_email, "tenant_id": tenant_id.lower()}
+
+    status_pipeline = [
+        {"$match": query},
+        {"$group": {"_id": "$status", "count": {"$sum": 1}}}
+    ]
+    status_cursor = db.documents.aggregate(status_pipeline)
+
+    status_counts = {"completed": 0, "processing": 0, "failed": 0, "queued": 0}
+    total_docs = 0
+    for item in status_cursor:
+        status_name = item["_id"] or "processing"
+        status_counts[status_name] = item["count"]
+        total_docs += item["count"]
+
+    type_pipeline = [
+        {"$match": query},
+        {"$group": {"_id": "$extracted_data.document_type", "count": {"$sum": 1}}}
+    ]
+    type_cursor = db.documents.aggregate(type_pipeline)
+
+    type_counts = {}
+    for item in type_cursor:
+        doc_type = item["_id"]
+        if not doc_type:
+            doc_type = "Unclassified"
+        else:
+            doc_type = str(doc_type).title()
+        type_counts[doc_type] = type_counts.get(doc_type, 0) + item["count"]
+
+    avg_conf_pipeline = [
+        {"$match": {**query, "status": "completed", "overall_confidence": {"$gt": 0}}},
+        {"$group": {"_id": None, "avg_confidence": {"$avg": "$overall_confidence"}}}
+    ]
+    avg_conf_cursor = list(db.documents.aggregate(avg_conf_pipeline))
+    avg_confidence = round(avg_conf_cursor[0]["avg_confidence"] * 100, 1) if avg_conf_cursor else 0.0
+
+    time_pipeline = [
+        {"$match": query},
+        {"$group": {
+            "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}},
+            "count": {"$sum": 1}
+        }},
+        {"$sort": {"_id": 1}},
+        {"$limit": 7}
+    ]
+    time_cursor = db.documents.aggregate(time_pipeline)
+    volume_over_time = []
+    for item in time_cursor:
+        volume_over_time.append({
+            "date": item["_id"],
+            "uploads": item["count"]
+        })
+    if not volume_over_time:
+        volume_over_time.append({"date": "No Data", "uploads": 0})
+
+    return {
+        "totalDocs": total_docs,
+        "statusCounts": status_counts,
+        "typeCounts": type_counts,
+        "averageConfidence": avg_confidence,
+        "volumeOverTime": volume_over_time
+    }
 
 
 @router.get("/documents")

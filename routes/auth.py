@@ -39,6 +39,17 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     return payload["sub"]
 
 
+def get_current_admin(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = decode_access_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return payload["sub"]
+
+
 def get_current_tenant(credentials: HTTPAuthorizationCredentials = Depends(security)):
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -57,15 +68,19 @@ async def signup(body: SignupRequest):
 
     tenant_id = body.email.lower().replace("@", "_at_").replace(".", "_dot_")
 
+    is_first = db.users.count_documents({}) == 0
+    role = "admin" if is_first else "user"
+
     user = {
         "email": body.email.lower(),
         "name": body.name,
         "hashed_password": hash_password(body.password),
         "tenant_id": tenant_id,
+        "role": role,
     }
     db.users.insert_one(user)
-    token = create_access_token({"sub": body.email.lower(), "tenant_id": tenant_id})
-    return {"token": token, "user": {"email": user["email"], "name": user["name"]}, "tenant_id": tenant_id}
+    token = create_access_token({"sub": body.email.lower(), "tenant_id": tenant_id, "role": role})
+    return {"token": token, "user": {"email": user["email"], "name": user["name"], "role": role}, "tenant_id": tenant_id}
 
 
 @router.post("/login")
@@ -76,8 +91,9 @@ async def login(body: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     tenant_id = user.get("tenant_id", "default")
-    token = create_access_token({"sub": user["email"], "tenant_id": tenant_id})
-    return {"token": token, "user": {"email": user["email"], "name": user["name"]}, "tenant_id": tenant_id}
+    role = user.get("role", "user")
+    token = create_access_token({"sub": user["email"], "tenant_id": tenant_id, "role": role})
+    return {"token": token, "user": {"email": user["email"], "name": user["name"], "role": role}, "tenant_id": tenant_id}
 
 
 @router.get("/me")
@@ -86,7 +102,7 @@ async def get_me(email: str = Depends(get_current_user)):
     user = db.users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"email": user["email"], "name": user["name"], "tenant_id": user.get("tenant_id", "default")}
+    return {"email": user["email"], "name": user["name"], "role": user.get("role", "user"), "tenant_id": user.get("tenant_id", "default")}
 
 
 @router.post("/forgot-password")

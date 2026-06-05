@@ -52,18 +52,47 @@ def extract_text_from_image(image_path: str) -> str:
     if not tesseract_available:
         return ""
     image = Image.open(image_path)
-
     image = correct_orientation(image)
+    return _ocr_image_to_text(image)
 
+
+def extract_words_from_image(image_path: str) -> list[dict]:
+    if not tesseract_available:
+        return []
+    image = Image.open(image_path)
+    image = correct_orientation(image)
     scale = max(1, 1200 // max(image.size))
     if scale > 1:
         image = image.resize((image.width * scale, image.height * scale), Image.LANCZOS)
+    processed = preprocess_image_light(image)
+    data = pytesseract.image_to_data(processed, config="--psm 3 --oem 1", output_type=pytesseract.Output.DICT)
+    words = []
+    img_w, img_h = processed.size
+    for i in range(len(data["text"])):
+        text = (data["text"][i] or "").strip()
+        conf = int(data["conf"][i]) if data["conf"][i] != "-1" else 0
+        if text and len(text) > 1 and conf > 20:
+            words.append({
+                "text": text,
+                "x": data["left"][i],
+                "y": data["top"][i],
+                "w": data["width"][i],
+                "h": data["height"][i],
+                "conf": conf,
+                "page_w": img_w,
+                "page_h": img_h,
+            })
+    return words
 
+
+def _ocr_image_to_text(image) -> str:
+    scale = max(1, 1200 // max(image.size))
+    if scale > 1:
+        image = image.resize((image.width * scale, image.height * scale), Image.LANCZOS)
     processed = preprocess_image_light(image)
     text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
     if text:
         return text
-
     processed = preprocess_image_aggressive(image)
     text = pytesseract.image_to_string(processed, config="--psm 6 --oem 1").strip()
     return text
@@ -72,12 +101,7 @@ def extract_text_from_image(image_path: str) -> str:
 def _ocr_pil_image(pil_image):
     try:
         pil_image = correct_orientation(pil_image)
-        processed = preprocess_image_light(pil_image)
-        page_text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
-        if not page_text:
-            processed = preprocess_image_aggressive(pil_image)
-            page_text = pytesseract.image_to_string(processed, config="--psm 6 --oem 1").strip()
-        return page_text
+        return _ocr_image_to_text(pil_image)
     except Exception:
         return ""
 

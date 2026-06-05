@@ -1,8 +1,9 @@
 """ARQ worker for processing document extraction jobs.
 
-Run with:
+Run in a separate process / container:
   python worker.py
-or
+
+Or use the WorkerSettings class:
   arq worker.worker.WorkerSettings
 """
 
@@ -29,13 +30,13 @@ if __name__ == "__main__":
 
     async def main():
         if REDIS_URL.startswith(("redis://", "rediss://", "unix://")):
-            settings = RedisSettings.from_dsn(REDIS_URL)
+            settings = RedisSettings.from_dsn(REDIS_URL, max_connections=10, retry_on_timeout=True, socket_keepalive=True)
         else:
             parsed = urlparse(REDIS_URL)
             host = parsed.hostname or "localhost"
             port = parsed.port or 6379
             password = parsed.password or None
-            settings = RedisSettings(host=host, port=port, password=password)
+            settings = RedisSettings(host=host, port=port, password=password, max_connections=10, retry_on_timeout=True, socket_keepalive=True)
 
         redis = await create_pool(settings)
         worker = Worker(redis, functions=[process_document_job])
