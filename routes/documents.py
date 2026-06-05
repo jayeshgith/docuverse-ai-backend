@@ -2,8 +2,8 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import List
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks, Depends
 from bson import ObjectId
 
@@ -319,11 +319,36 @@ async def get_document_stats(
 async def list_documents(
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=50),
+    search: Optional[str] = Query(None),
+    year: Optional[int] = Query(None, ge=2000, le=2100),
+    month: Optional[int] = Query(None, ge=1, le=12),
+    day: Optional[int] = Query(None, ge=1, le=31),
     user_email: str = Depends(get_current_user),
     tenant_id: str = Depends(get_current_tenant),
 ):
     db = get_db()
     query = {"user_id": user_email, "tenant_id": tenant_id.lower()}
+
+    if search:
+        query["original_name"] = {"$regex": search, "$options": "i"}
+
+    if year is not None:
+        if month is not None:
+            if day is not None:
+                start_date = datetime(year, month, day, tzinfo=timezone.utc)
+                end_date = start_date + timedelta(days=1)
+            else:
+                start_date = datetime(year, month, 1, tzinfo=timezone.utc)
+                if month == 12:
+                    end_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+                else:
+                    end_date = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+        else:
+            start_date = datetime(year, 1, 1, tzinfo=timezone.utc)
+            end_date = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+
+        query["created_at"] = {"$gte": start_date, "$lt": end_date}
+
     total = db.documents.count_documents(query)
     total_pages = max(1, (total + limit - 1) // limit)
 
