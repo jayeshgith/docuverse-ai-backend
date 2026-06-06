@@ -358,7 +358,7 @@ Return ONLY a JSON object with these exact keys: {json.dumps(schema)}
 Set missing fields to null. No extra keys.
 
 OCR text from document:
-{raw_text[:4000]}"""
+{raw_text[:8000]}"""
 
     try:
         r = client.chat.completions.create(
