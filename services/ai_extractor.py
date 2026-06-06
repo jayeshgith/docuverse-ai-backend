@@ -140,8 +140,40 @@ LABEL_EXCLUDE = r"(pan|permanent|perm anent|account|acc0unt|number|num ber|incom
 SEP_NL = r"\s*[:\-]?\s*\n\s*"
 
 
-def detect_document_type(raw_text):
+def detect_document_type(raw_text, tenant_id="default"):
     t = raw_text.lower()
+
+    # Check configured document types from MongoDB first
+    try:
+        db = get_db()
+        configured = list(db.document_configs.find({
+            "$or": [{"tenant_id": tenant_id.lower()}, {"tenant_id": "default"}]
+        }))
+        seen = set()
+        for cfg in configured:
+            slug = cfg.get("document_type", "").lower()
+            if slug in seen:
+                continue
+            seen.add(slug)
+            display = cfg.get("display_name", "").lower()
+            # Match by slug or display name in the raw text
+            if slug.replace("_", " ") in t or (display and display in t):
+                print(f"[INFO] detect_document_type: matched configured type '{slug}'")
+                return slug
+            # Match by regex patterns in configured fields
+            for f in cfg.get("fields", []):
+                pattern = f.get("regex_pattern")
+                if pattern:
+                    try:
+                        if re.search(pattern, raw_text, re.IGNORECASE):
+                            print(f"[INFO] detect_document_type: matched '{slug}' via field regex '{f.get('key')}'")
+                            return slug
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"[WARN] detect_document_type: config lookup error: {e}")
+
+    # Fall back to hardcoded classifiers
     score = sum(1 for w in ["resume", "curriculum vitae", "cv", "experience", "skills", "education", "objective"] if w in t)
     if score >= 3:
         return "resume"
@@ -397,7 +429,7 @@ def extract_fields(raw_text, tenant_id="default"):
         print("[WARN] extract_fields: text too short, skipping")
         return {}, {}, 0.0
 
-    doc_type = detect_document_type(raw_text)
+    doc_type = detect_document_type(raw_text, tenant_id)
     print(f"[INFO] detect_document_type -> {doc_type}")
 
     config = get_doc_config(doc_type, tenant_id)

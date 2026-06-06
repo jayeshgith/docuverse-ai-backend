@@ -27,12 +27,26 @@ async def list_document_configs(
     user_email: str = Depends(get_current_user),
 ):
     db = get_db()
-    cursor = db.document_configs.find({"tenant_id": tenant_id.lower()})
-    configs = []
-    for c in cursor:
+    # Fetch default configs first, then tenant overrides
+    default_cursor = db.document_configs.find({"tenant_id": "default"})
+    tenant_cursor = db.document_configs.find({"tenant_id": tenant_id.lower()})
+
+    defaults = {}
+    for c in default_cursor:
         c["_id"] = str(c["_id"])
-        configs.append(c)
-    return configs
+        c["source"] = "default"
+        defaults[c["document_type"]] = c
+
+    tenant_overrides = {}
+    for c in tenant_cursor:
+        c["_id"] = str(c["_id"])
+        c["source"] = "tenant"
+        tenant_overrides[c["document_type"]] = c
+
+    # Merge: tenant overrides take precedence
+    merged = dict(defaults)
+    merged.update(tenant_overrides)
+    return list(merged.values())
 
 
 @router.get("/document-configs/{doc_type}")

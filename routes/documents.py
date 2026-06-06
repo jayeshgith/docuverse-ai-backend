@@ -10,7 +10,7 @@ from bson import ObjectId
 from pathlib import Path as PathLib
 import asyncio
 from services.database import get_db
-from services.ocr import extract_text
+from services.ocr import extract_text, extract_words_from_image
 from services.ai_extractor import extract_fields
 from services.redis_pool import get_redis_pool, redis_available
 from services.task_queue import process_document_job
@@ -124,6 +124,7 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
     overall_confidence = 0.0
     status = "failed"
     error_message = None
+    ocr_words = []
 
     print(f"\n{'='*60}")
     print(f"[START] process_document: doc_id={doc_id}, file_id={file_id}, tenant={tenant_id}")
@@ -164,6 +165,14 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
         raw_text = extract_text(tmp)
         t1 = time.time()
         print(f"[TIME] OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
+
+        ext = Path(file_doc.get("filename", "")).suffix.lower()
+        if ext in (".jpg", ".jpeg", ".png", ".webp"):
+            try:
+                ocr_words = extract_words_from_image(tmp)
+                print(f"[INFO] Extracted {len(ocr_words)} word boxes from image")
+            except Exception as we:
+                print(f"[WARN] Could not extract word boxes: {we}")
 
         if not raw_text or len(raw_text.strip()) < 10:
             error_message = "OCR could not extract readable text. The document may be a scanned image — ensure Tesseract OCR is installed."
@@ -227,6 +236,7 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
                 "confidence_scores": confidence_scores,
                 "overall_confidence": overall_confidence,
                 "raw_text": raw_text,
+                "ocr_words": ocr_words,
             }
             final_msg = error_message or "Document processed successfully"
             publish_sync(doc_id, {"step": "done", "message": final_msg, "status": status, "payload": payload})
