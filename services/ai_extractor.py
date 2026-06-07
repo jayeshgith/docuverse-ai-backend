@@ -48,6 +48,12 @@ HARDCODED_CONFIGS: dict[str, dict] = {
         "llm_hint": "Extract resume details including full name, email, phone, skills, education, and experience.",
         "confidence_threshold": 0.78,
     },
+    "voter_id": {
+        "fields": ["document_type", "voter_id_number", "name", "father_name", "gender", "dob", "address"],
+        "required_fields": ["voter_id_number", "name", "father_name"],
+        "llm_hint": "Extract Indian Voter ID (EPIC) card details. Voter ID number is 3 uppercase letters followed by 7 digits (e.g. ABC1234567). Fields include name, father/husband name, gender, DOB, and address.",
+        "confidence_threshold": 0.78,
+    },
     "other": {
         "fields": ["document_type", "name", "document_number", "date", "email", "phone", "father_name", "holder_name", "card_number", "address", "dob"],
         "required_fields": [],
@@ -115,6 +121,8 @@ DOB_RE = r"(?:dob|d\.o\.b|d\.0\.b|date\s*of\s*birth|birth\s*date|date\s*of\s*bir
 DATE_RE = r"(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})"
 EMAIL_RE = r"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"
 PHONE_RE = r"((?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})"
+VOTER_ID_RE = r"(?:voter|epic|voter\s*id|voter's\s*id)\s*(?:no|number|#|\.)?\s*[:\-]\s*([A-Z]{3}\s*\d{7})"
+VOTER_EPIC_RE = r"([A-Z]{3}\s*\d{7})"
 VENDOR_RE = r"(?:vendor|seller|supplier|store|shop|company|merchant|vender|billed to|bill from|biled to)\s*[:\-]\s*([A-Za-z0-9\s\.'\-&]+?)(?:\n|$)"
 TOTAL_RE = r"(?:total|grand total|total amount|amount due|net amount|balance due|sum|tota1|totai)\s*[:\-]?\s*[₹$]?\s*([\d,]+\.\d{2})"
 NATIONALITY_RE = r"(?:nationality|citizenship|nati0nality)\s*[:\-]\s*([A-Za-z\s]+?)(?:\n|$|\d)"
@@ -157,6 +165,8 @@ def detect_document_type(raw_text, tenant_id="default"):
         return "invoice"
     if any(w in t for w in ["bill", "receipt", "recipt", "payment", "total due", "amount due"]):
         return "bill"
+    if any(w in t for w in ["voter id", "voter's id", "voter identity", "epic card", "election commission", "voter", "epic no"]):
+        return "voter_id"
 
     # 2. Check regexes of default patterns
     cleaned = PAN_CLEAN_RE.sub("", raw_text)
@@ -167,6 +177,10 @@ def detect_document_type(raw_text, tenant_id="default"):
         return "passport"
     if re.search(AADHAAR_RE, raw_text) or re.search(AADHAAR_RE_MULTI, raw_text):
         return "aadhaar_card"
+    voter_clean = PAN_CLEAN_RE.sub("", raw_text)
+    voter_match = re.search(r"[A-Z]{3}\d{7}", voter_clean)
+    if voter_match:
+        return "voter_id"
 
     # 3. Dynamic lookup for custom template definitions (like custom cards, e.g. other_card, driving_license)
     try:
@@ -367,6 +381,36 @@ def extract_fields_rule_based(raw_text, doc_type):
         if m:
             fields["experience_summary"] = m.group(1).strip()[:300]
 
+    elif doc_type == "voter_id":
+        fields["voter_id_number"] = get(VOTER_ID_RE) or get(VOTER_EPIC_RE)
+        if fields.get("voter_id_number"):
+            fields["voter_id_number"] = PAN_CLEAN_RE.sub("", fields["voter_id_number"])
+        fields["name"] = get(NAME_RE)
+        if not fields.get("name"):
+            lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
+            for i, line in enumerate(lines):
+                if re.search(r"(voter|epic|election)", line, re.I):
+                    for j in range(i + 1, min(i + 5, len(lines))):
+                        candidate = lines[j].strip()
+                        if (not re.search(LABEL_EXCLUDE, candidate, re.I)
+                                and re.match(r"^[A-Za-z][A-Za-z\s.'-]{3,40}$", candidate)
+                                and not re.match(r"^\d", candidate)):
+                            fields["name"] = candidate
+                            break
+                    break
+        fields["father_name"] = get(FATHER_RE)
+        if not fields.get("father_name"):
+            m = re.search(r"(?:father|husband)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)", raw_text, re.IGNORECASE)
+            if m:
+                fields["father_name"] = m.group(1).strip()
+        fields["gender"] = get(GENDER_RE)
+        if not fields.get("gender"):
+            m = re.search(r"\b(Male|Female|MALE|FEMALE|M|F)\b", raw_text)
+            if m:
+                fields["gender"] = m.group(0).title()
+        fields["dob"] = get(DOB_RE) or get(DATE_RE)
+        fields["address"] = get(ADDRESS_RE) or get(ADDRESS_FALLBACK_RE)
+
     else:
         fields["name"] = get(NAME_RE)
         if not fields.get("name"):
@@ -405,6 +449,7 @@ def _trim_relevant_text(raw_text: str, doc_type: str, max_chars: int = 1500) -> 
         "invoice": ["invoice", "total", "amount", "vendor", "date", "bill to"],
         "bill": ["bill", "receipt", "total", "amount", "date"],
         "resume": ["name", "email", "phone", "skills", "experience", "education"],
+        "voter_id": ["voter", "epic", "name", "father", "husband", "gender", "dob", "address", "election"],
     }
     keywords = score_kw.get(doc_type, ["name", "date", "number", "id"])
     for line in lines:

@@ -114,6 +114,21 @@ def seed_default_configs():
                     {"key": "experience_summary", "description": "Work experience summary", "regex_pattern": None, "is_required": False},
                 ],
             },
+            {
+                "document_type": "voter_id",
+                "display_name": "Voter ID Card",
+                "tenant_id": "default",
+                "confidence_threshold": 0.78,
+                "fields": [
+                    {"key": "document_type", "description": "Document type label", "regex_pattern": None, "is_required": True},
+                    {"key": "voter_id_number", "description": "Voter ID / EPIC number (3 letters + 7 digits)", "regex_pattern": r"(?:voter|epic|voter\s*id|voter's\s*id)\s*(?:no|number|#|\.)?\s*[:\-]\s*([A-Z]{3}\s*\d{7})", "is_required": True},
+                    {"key": "name", "description": "Holder name on the voter ID", "regex_pattern": r"(?:name|full name|holder name|voter name|voter's name)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)", "is_required": True},
+                    {"key": "father_name", "description": "Father's/Husband's name", "regex_pattern": r"(?:father|father's name|father name|husband|husband's name|husband name)\s*[:\-]\s*([A-Za-z\s\.'\-]+?)(?:\n|$)", "is_required": True},
+                    {"key": "gender", "description": "Gender (Male/Female)", "regex_pattern": r"(?:gender|sex)\s*[:\-]\s*(M|F|Male|Female|MALE|FEMALE)", "is_required": False},
+                    {"key": "dob", "description": "Date of birth", "regex_pattern": r"(?:dob|date\s*of\s*birth|birth\s*date|d\.o\.b)\s*[:\-]\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})", "is_required": False},
+                    {"key": "address", "description": "Residential address on voter ID", "regex_pattern": r"(?:address|residence|permanent address|addr)\s*[:\-]\s*([\w\s,\.\-/#]+?)(?:\n{2,}|$)", "is_required": False},
+                ],
+            },
         ]
         for cfg in defaults:
             db.document_configs.update_one(
