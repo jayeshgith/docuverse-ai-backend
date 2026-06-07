@@ -8,9 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks, Depends
 from bson import ObjectId
 
-from pathlib import Path as PathLib
 import asyncio
-import functools
 from services.database import get_db
 from services.ocr import extract_text
 from services.ai_extractor import extract_fields
@@ -100,23 +98,22 @@ async def upload_document(
     result = db.documents.insert_one(doc)
     doc["_id"] = str(result.inserted_id)
 
+    job_handled = False
     if redis_available():
         try:
             pool = await get_redis_pool()
             if pool:
                 await pool.enqueue_job("process_document_job", doc["_id"], file_id, tenant_id.lower())
                 print(f"[INFO] Enqueued ARQ job for doc {doc['_id']}")
+                job_handled = True
         except Exception as e:
-            print(f"[WARN] ARQ enqueue failed, falling back to BackgroundTasks: {e}")
-            if background_tasks:
-                background_tasks.add_task(_run_process_document, doc["_id"], file_id, tenant_id.lower())
-    elif background_tasks:
+            print(f"[WARN] ARQ enqueue failed: {e}")
+    if not job_handled and background_tasks:
         background_tasks.add_task(_run_process_document, doc["_id"], file_id, tenant_id.lower())
 
     return doc
 
 
-_MAX_EXTRACTION_SECS = 120
 _heartbeat_events: dict[str, threading.Event] = {}
 
 
@@ -146,21 +143,7 @@ def _heartbeat_stop(doc_id: str):
 
 async def _run_process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
     loop = asyncio.get_event_loop()
-    try:
-        await asyncio.wait_for(
-            loop.run_in_executor(None, process_document, doc_id, file_id, tenant_id),
-            timeout=_MAX_EXTRACTION_SECS,
-        )
-    except asyncio.TimeoutError:
-        print(f"[TIMEOUT] process_document({doc_id}) exceeded {_MAX_EXTRACTION_SECS}s")
-        try:
-            db = get_db()
-            db.documents.update_one(
-                {"_id": ObjectId(doc_id)},
-                {"$set": {"status": "failed", "error_message": f"Extraction timed out after {_MAX_EXTRACTION_SECS}s", "updated_at": datetime.now(timezone.utc)}}
-            )
-        except Exception:
-            pass
+    await loop.run_in_executor(None, process_document, doc_id, file_id, tenant_id)
 
 
 def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
@@ -540,15 +523,16 @@ async def upload_bulk_documents(
         doc_result = db.documents.insert_one(doc)
         doc_id = str(doc_result.inserted_id)
 
+        job_handled = False
         if redis_available():
             try:
                 pool = await get_redis_pool()
                 if pool:
                     await pool.enqueue_job("process_document_job", doc_id, file_id, tenant_id.lower())
-            except Exception:
-                if background_tasks:
-                    background_tasks.add_task(_run_process_document, doc_id, file_id, tenant_id.lower())
-        elif background_tasks:
+                    job_handled = True
+            except Exception as e:
+                print(f"[WARN] ARQ enqueue failed for bulk: {e}")
+        if not job_handled and background_tasks:
             background_tasks.add_task(_run_process_document, doc_id, file_id, tenant_id.lower())
 
         results.append({"filename": file.filename, "doc_id": doc_id, "status": "queued"})
