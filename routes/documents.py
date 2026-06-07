@@ -1,6 +1,7 @@
 import os
 import tempfile
 import time
+import threading
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
@@ -11,7 +12,7 @@ from pathlib import Path as PathLib
 import asyncio
 import functools
 from services.database import get_db
-from services.ocr import extract_text, extract_words_from_image
+from services.ocr import extract_text
 from services.ai_extractor import extract_fields
 from services.redis_pool import get_redis_pool, redis_available
 from services.task_queue import process_document_job
@@ -116,6 +117,31 @@ async def upload_document(
 
 
 _MAX_EXTRACTION_SECS = 120
+_heartbeat_events: dict[str, threading.Event] = {}
+
+
+def _heartbeat_start(doc_id: str):
+    stop = threading.Event()
+    _heartbeat_events[doc_id] = stop
+
+    def _beat():
+        steps = ["Scanning document layout...", "Reading text regions...", "Processing characters...", "Extracting content..."]
+        i = 0
+        while not stop.wait(15):
+            if stop.is_set():
+                break
+            msg = steps[i % len(steps)]
+            publish_sync(doc_id, {"step": "ocr", "message": msg})
+            i += 1
+
+    t = threading.Thread(target=_beat, daemon=True)
+    t.start()
+
+
+def _heartbeat_stop(doc_id: str):
+    ev = _heartbeat_events.pop(doc_id, None)
+    if ev:
+        ev.set()
 
 
 async def _run_process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
@@ -182,20 +208,13 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
             tmp_file.write(content)
             tmp = tmp_file.name
 
-        publish_sync(doc_id, {"step": "ocr", "message": "Running OCR on document"})
+        publish_sync(doc_id, {"step": "ocr", "message": "Running OCR — extracting text from document..."})
+        _heartbeat_start(doc_id)
 
         t0 = time.time()
         raw_text = extract_text(tmp)
         t1 = time.time()
         print(f"[TIME] OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
-
-        ext = Path(file_doc.get("filename", "")).suffix.lower()
-        if ext in (".jpg", ".jpeg", ".png", ".webp"):
-            try:
-                ocr_words = extract_words_from_image(tmp)
-                print(f"[INFO] Extracted {len(ocr_words)} word boxes from image")
-            except Exception as we:
-                print(f"[WARN] Could not extract word boxes: {we}")
 
         if not raw_text or len(raw_text.strip()) < 10:
             error_message = "OCR could not extract readable text. The document may be a scanned image — ensure Tesseract OCR is installed."
@@ -234,6 +253,7 @@ def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
             except Exception:
                 pass
 
+        _heartbeat_stop(doc_id)
         elapsed = time.time() - t_start
         print(f"[TIME] process_document total: {elapsed:.1f}s, status={status}")
 

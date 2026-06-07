@@ -69,11 +69,7 @@ def extract_text_from_image(image_path: str) -> str:
             return _ocr_cache["raw_text"]
         new_file = _ocr_cache["file_path"] != image_path
         if new_file:
-            _ocr_cache["file_path"] = image_path
-            _ocr_cache["oriented_image"] = None
-            _ocr_cache["processed_light_image"] = None
-            _ocr_cache["raw_text"] = None
-            _ocr_cache["words"] = None
+            _ocr_cache = {"file_path": image_path, "oriented_image": None, "processed_light_image": None, "raw_text": None, "words": None}
 
         if _ocr_cache["oriented_image"] is None:
             try:
@@ -84,19 +80,19 @@ def extract_text_from_image(image_path: str) -> str:
         image = _ocr_cache["oriented_image"]
 
         if _ocr_cache["processed_light_image"] is None or new_file:
-            scale = max(1, 1000 // max(image.size))
+            scale = max(1, 800 // max(image.size))
             img = image.resize((image.width * scale, image.height * scale), Image.LANCZOS) if scale > 1 else image
             processed = preprocess_image_light(img)
             _ocr_cache["processed_light_image"] = processed
         processed = _ocr_cache["processed_light_image"]
 
-    text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
+    text = pytesseract.image_to_string(processed, config="--psm 6 --oem 1").strip()
     if not text:
         oriented = _ocr_cache.get("oriented_image") if _ocr_cache.get("file_path") == image_path else None
         if oriented:
             with _cache_lock:
                 oriented_corrected = correct_orientation(oriented)
-                scale = max(1, 1000 // max(oriented_corrected.size))
+                scale = max(1, 800 // max(oriented_corrected.size))
                 img = oriented_corrected.resize((oriented_corrected.width * scale, oriented_corrected.height * scale), Image.LANCZOS) if scale > 1 else oriented_corrected
                 processed_agg = preprocess_image_aggressive(img)
             text = pytesseract.image_to_string(processed_agg, config="--psm 6 --oem 1").strip()
@@ -171,14 +167,13 @@ def extract_words_from_image(image_path: str) -> list[dict]:
 
 
 def _ocr_image_to_text(image) -> str:
-    scale = max(1, 1200 // max(image.size))
-    if scale > 1:
-        image = image.resize((image.width * scale, image.height * scale), Image.LANCZOS)
-    processed = preprocess_image_light(image)
-    text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
+    scale = max(1, 800 // max(image.size))
+    img = image.resize((image.width * scale, image.height * scale), Image.LANCZOS) if scale > 1 else image
+    processed = preprocess_image_light(img)
+    text = pytesseract.image_to_string(processed, config="--psm 6 --oem 1").strip()
     if text:
         return text
-    processed = preprocess_image_aggressive(image)
+    processed = preprocess_image_aggressive(img)
     text = pytesseract.image_to_string(processed, config="--psm 6 --oem 1").strip()
     return text
 
@@ -207,7 +202,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return ""
 
     with open_pdf(pdf_path) as pdf:
-        page_images = [page.to_image(resolution=120).original for page in pdf.pages]
+        page_images = [page.to_image(resolution=100).original for page in pdf.pages]
 
     text_parts = []
     workers = min(os.cpu_count() or 2, len(page_images)) if len(page_images) > 1 else 1

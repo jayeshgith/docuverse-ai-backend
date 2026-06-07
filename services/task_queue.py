@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 
 from services.database import get_db
-from services.ocr import extract_text, extract_words_from_image
+from services.ocr import extract_text
 from services.ai_extractor import extract_fields
 from services.progress import publish
 
@@ -105,14 +105,6 @@ async def process_document_job(ctx, doc_id: str, file_id: str, tenant_id: str = 
         raw_text = extract_text(tmp)
         t1 = time.time()
         print(f"[TIME] OCR took {t1-t0:.1f}s, text length={len(raw_text)}")
-
-        ext = Path(file_doc.get("filename", "")).suffix.lower()
-        if ext in (".jpg", ".jpeg", ".png", ".webp"):
-            try:
-                ocr_words = extract_words_from_image(tmp)
-                print(f"[INFO] Extracted {len(ocr_words)} word boxes from image")
-            except Exception as we:
-                print(f"[WARN] Could not extract word boxes: {we}")
 
         if not raw_text or len(raw_text.strip()) < 10:
             error_message = "OCR could not extract readable text. The document may be a scanned image."
