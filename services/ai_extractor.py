@@ -142,38 +142,8 @@ SEP_NL = r"\s*[:\-]?\s*\n\s*"
 
 def detect_document_type(raw_text, tenant_id="default"):
     t = raw_text.lower()
-
-    # Check configured document types from MongoDB first
-    try:
-        db = get_db()
-        configured = list(db.document_configs.find({
-            "$or": [{"tenant_id": tenant_id.lower()}, {"tenant_id": "default"}]
-        }))
-        seen = set()
-        for cfg in configured:
-            slug = cfg.get("document_type", "").lower()
-            if slug in seen:
-                continue
-            seen.add(slug)
-            display = cfg.get("display_name", "").lower()
-            # Match by slug or display name in the raw text
-            if slug.replace("_", " ") in t or (display and display in t):
-                print(f"[INFO] detect_document_type: matched configured type '{slug}'")
-                return slug
-            # Match by regex patterns in configured fields
-            for f in cfg.get("fields", []):
-                pattern = f.get("regex_pattern")
-                if pattern:
-                    try:
-                        if re.search(pattern, raw_text, re.IGNORECASE):
-                            print(f"[INFO] detect_document_type: matched '{slug}' via field regex '{f.get('key')}'")
-                            return slug
-                    except Exception:
-                        pass
-    except Exception as e:
-        print(f"[WARN] detect_document_type: config lookup error: {e}")
-
-    # Fall back to hardcoded classifiers
+    
+    # 1. First run the hardcoded rules for default types to keep performance high
     score = sum(1 for w in ["resume", "curriculum vitae", "cv", "experience", "skills", "education", "objective"] if w in t)
     if score >= 3:
         return "resume"
@@ -188,15 +158,50 @@ def detect_document_type(raw_text, tenant_id="default"):
     if any(w in t for w in ["bill", "receipt", "recipt", "payment", "total due", "amount due"]):
         return "bill"
 
+    # 2. Check regexes of default patterns
     cleaned = PAN_CLEAN_RE.sub("", raw_text)
     pan_match = re.search(r"[A-Z]{5}\d{4}[A-Z]", cleaned)
     if pan_match:
         return "pan_card"
-
     if re.search(PASSPORT_NUM_RE, raw_text):
         return "passport"
     if re.search(AADHAAR_RE, raw_text) or re.search(AADHAAR_RE_MULTI, raw_text):
         return "aadhaar_card"
+
+    # 3. Dynamic lookup for custom template definitions (like custom cards, e.g. other_card, driving_license)
+    try:
+        db = get_db()
+        configs = list(db.document_configs.find({"tenant_id": {"$in": [tenant_id.lower(), "default"]}}))
+        # Sort so tenant-specific override matches are checked first
+        configs.sort(key=lambda x: 0 if x.get("tenant_id") == tenant_id.lower() else 1)
+        
+        for cfg in configs:
+            doc_type = cfg.get("document_type")
+            display_name = cfg.get("display_name", "")
+            
+            # Check keywords matching display name or document type slug
+            keywords = [doc_type.replace("_", " "), doc_type, display_name.lower()]
+            if any(kw in t for kw in keywords if kw):
+                return doc_type
+                
+            # Check if fields match regex patterns
+            fields = cfg.get("fields", [])
+            matched = 0
+            has_patterns = False
+            for f in fields:
+                pattern = f.get("regex_pattern")
+                if pattern:
+                    has_patterns = True
+                    try:
+                        if re.search(pattern, raw_text, re.IGNORECASE | re.MULTILINE):
+                            matched += 1
+                    except Exception:
+                        pass
+            if has_patterns and matched >= max(1, sum(1 for f in fields if f.get("regex_pattern")) // 2):
+                return doc_type
+    except Exception as e:
+        print(f"[WARN] Error in dynamic document type detection: {e}")
+
     return "other"
 
 
@@ -379,32 +384,78 @@ def extract_fields_rule_based(raw_text, doc_type):
     return {k: v for k, v in fields.items() if v}
 
 
+import hashlib
+
+_openai_cache: dict[str, dict] = {}
+_MAX_CACHE_SIZE = 64
+
+
+def _cache_key(raw_text: str, doc_type: str) -> str:
+    h = hashlib.md5(raw_text[:500].encode(), usedforsecurity=False).hexdigest()
+    return f"{doc_type}:{h}"
+
+
+def _trim_relevant_text(raw_text: str, doc_type: str, max_chars: int = 1500) -> str:
+    lines = raw_text.split("\n")
+    relevant = []
+    score_kw = {
+        "passport": ["passport", "name", "dob", "nationality", "gender", "number", "date of birth", "surname"],
+        "pan_card": ["pan", "permanent account", "income tax", "name", "father", "dob"],
+        "aadhaar_card": ["aadhaar", "uidai", "name", "dob", "address", "gender"],
+        "invoice": ["invoice", "total", "amount", "vendor", "date", "bill to"],
+        "bill": ["bill", "receipt", "total", "amount", "date"],
+        "resume": ["name", "email", "phone", "skills", "experience", "education"],
+    }
+    keywords = score_kw.get(doc_type, ["name", "date", "number", "id"])
+    for line in lines:
+        if any(kw in line.lower() for kw in keywords):
+            relevant.append(line)
+        if len("\n".join(relevant)) >= max_chars:
+            break
+    if not relevant:
+        return raw_text[:max_chars]
+    result = "\n".join(relevant)
+    if len(result) > max_chars:
+        result = result[:max_chars]
+    return result
+
+
 def extract_with_openai(raw_text, doc_type, config=None):
     if config is None:
         config = get_doc_config(doc_type)
     schema = config["fields"]
     hint = config.get("llm_hint", "")
+
+    trimmed = _trim_relevant_text(raw_text, doc_type, max_chars=1500)
+    ck = _cache_key(trimmed, doc_type)
+    if ck in _openai_cache:
+        print(f"[CACHE] OpenAI cache hit for {doc_type}")
+        return _openai_cache[ck]
+
     prompt = f"""{hint}
 
-Return ONLY a JSON object with these exact keys: {json.dumps(schema)}
-Set missing fields to null. No extra keys.
+Return ONLY JSON with these keys: {json.dumps(schema)}
+null means N/A.
 
-OCR text from document:
-{raw_text[:8000]}"""
+OCR text:
+{trimmed}"""
 
     try:
         r = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You extract structured data from OCR text. Return ONLY valid JSON."},
+                {"role": "system", "content": "Extract JSON from OCR text. Only valid JSON."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.05, max_tokens=600,
-            timeout=15,
+            temperature=0.0, max_tokens=300,
+            timeout=8,
         )
         c = r.choices[0].message.content.strip()
         c = re.sub(r"^```(?:json)?\s*|\s*```$", "", c)
-        return {k: v for k, v in json.loads(c).items() if v is not None}
+        result = {k: v for k, v in json.loads(c).items() if v is not None}
+        if len(_openai_cache) < _MAX_CACHE_SIZE:
+            _openai_cache[ck] = result
+        return result
     except Exception:
         return None
 
@@ -447,12 +498,13 @@ def extract_fields(raw_text, tenant_id="default"):
     required = config.get("required_fields", [])
     threshold = config.get("confidence_threshold", 0.78)
 
-    # Short-circuit check: if all required fields are captured by regex, skip OpenAI
-    if required and all(rule_fields.get(f) for f in required) and len(rule_fields) >= len(required):
-        scores = {k: 0.85 for k in rule_fields}
+    # Short-circuit: skip OpenAI if regex already found a solid result
+    found_required = [f for f in required if rule_fields.get(f)]
+    if required and len(found_required) >= max(1, len(required) - 1) and len(rule_fields) >= len(required):
+        scores = {k: 0.88 if k in found_required else 0.78 for k in rule_fields}
         overall = round(sum(scores.values()) / len(scores), 2) if scores else 0.0
-        if overall >= threshold and overall > 0:
-            print(f"[INFO] RULES-FIRST SHORT-CIRCUIT: Skipped OpenAI API for {doc_type}!")
+        if overall >= 0.70:
+            print(f"[INFO] RULES SHORT-CIRCUIT: Regex got {len(found_required)}/{len(required)} required fields, skipping OpenAI for {doc_type}!")
             return rule_fields, scores, overall
 
     missing = [f for f in required if not rule_fields.get(f)]

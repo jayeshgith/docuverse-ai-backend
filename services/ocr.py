@@ -1,10 +1,10 @@
 import os
-import re
 import concurrent.futures
+import threading
 from pathlib import Path
 import pytesseract
 from pdfplumber import open as open_pdf
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 
 tesseract_available = False
 tesseract_cmd = os.environ.get("TESSERACT_CMD", "")
@@ -21,37 +21,12 @@ if os.path.exists(tesseract_cmd):
     pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
     tesseract_available = True
 
-MAX_PDF_PAGES = 20
-OCR_RESIZE_MIN = 800
-PDF_RENDER_DPI = 100
-
-# Single-file cache avoids redoing orientation/resize/preprocess
-# when both text and word extraction run on the same image.
-_ocr_cache = {
-    "path": None,
-    "oriented": None,
-    "scaled": None,
-    "preprocessed": None,
-}
-
-
-def _cache_get(image_path):
-    if _ocr_cache["path"] == image_path:
-        return _ocr_cache["oriented"], _ocr_cache["scaled"], _ocr_cache["preprocessed"]
-    return None
-
-
-def _cache_set(image_path, oriented, scaled, preprocessed):
-    _ocr_cache["path"] = image_path
-    _ocr_cache["oriented"] = oriented
-    _ocr_cache["scaled"] = scaled
-    _ocr_cache["preprocessed"] = preprocessed
-
 
 def correct_orientation(image):
     try:
         osd = pytesseract.image_to_osd(image, config="--psm 0 --oem 1")
-        angle = int(re.search(r"Orientation in degrees: (\d+)", osd).group(1))
+        import re as _re
+        angle = int(_re.search(r"Orientation in degrees: (\d+)", osd).group(1))
         if angle in (90, 180, 270):
             image = image.rotate(-angle, expand=True, fillcolor=(255, 255, 255))
     except Exception:
@@ -59,46 +34,117 @@ def correct_orientation(image):
     return image
 
 
-def preprocess_image(image):
+def preprocess_image_light(image):
     image = image.convert("L")
     enhancer = ImageEnhance.Contrast(image)
     return enhancer.enhance(1.5)
 
 
-def _resize_if_small(image):
-    scale = max(1, OCR_RESIZE_MIN // max(image.size))
-    if scale > 1:
-        image = image.resize((image.width * scale, image.height * scale), Image.LANCZOS)
+def preprocess_image_aggressive(image):
+    image = image.convert("L")
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(2.0)
+    image = image.filter(ImageFilter.SHARPEN)
+    image = image.point(lambda x: 0 if x < 160 else 255, "1")
     return image
+
+
+_cache_lock = threading.Lock()
+_ocr_cache = {
+    "file_path": None,
+    "oriented_image": None,
+    "processed_light_image": None,
+    "raw_text": None,
+    "words": None
+}
 
 
 def extract_text_from_image(image_path: str) -> str:
     if not tesseract_available:
         return ""
-    cached = _cache_get(image_path)
-    if cached:
-        _, _, processed = cached
-    else:
-        image = Image.open(image_path)
-        oriented = correct_orientation(image)
-        scaled = _resize_if_small(oriented)
-        processed = preprocess_image(scaled)
-        _cache_set(image_path, oriented, scaled, processed)
-    return pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
+    
+    global _ocr_cache
+    with _cache_lock:
+        if _ocr_cache["file_path"] == image_path and _ocr_cache["raw_text"] is not None:
+            return _ocr_cache["raw_text"]
+        new_file = _ocr_cache["file_path"] != image_path
+        if new_file:
+            _ocr_cache["file_path"] = image_path
+            _ocr_cache["oriented_image"] = None
+            _ocr_cache["processed_light_image"] = None
+            _ocr_cache["raw_text"] = None
+            _ocr_cache["words"] = None
+
+        if _ocr_cache["oriented_image"] is None:
+            try:
+                image = Image.open(image_path)
+                _ocr_cache["oriented_image"] = image
+            except Exception:
+                return ""
+        image = _ocr_cache["oriented_image"]
+
+        if _ocr_cache["processed_light_image"] is None or new_file:
+            scale = max(1, 1000 // max(image.size))
+            img = image.resize((image.width * scale, image.height * scale), Image.LANCZOS) if scale > 1 else image
+            processed = preprocess_image_light(img)
+            _ocr_cache["processed_light_image"] = processed
+        processed = _ocr_cache["processed_light_image"]
+
+    text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
+    if not text:
+        oriented = _ocr_cache.get("oriented_image") if _ocr_cache.get("file_path") == image_path else None
+        if oriented:
+            with _cache_lock:
+                oriented_corrected = correct_orientation(oriented)
+                scale = max(1, 1000 // max(oriented_corrected.size))
+                img = oriented_corrected.resize((oriented_corrected.width * scale, oriented_corrected.height * scale), Image.LANCZOS) if scale > 1 else oriented_corrected
+                processed_agg = preprocess_image_aggressive(img)
+            text = pytesseract.image_to_string(processed_agg, config="--psm 6 --oem 1").strip()
+
+    with _cache_lock:
+        if _ocr_cache["file_path"] == image_path:
+            _ocr_cache["raw_text"] = text
+
+    return text
 
 
 def extract_words_from_image(image_path: str) -> list[dict]:
     if not tesseract_available:
         return []
-    cached = _cache_get(image_path)
-    if cached:
-        oriented, scaled, processed = cached
-    else:
-        image = Image.open(image_path)
-        oriented = correct_orientation(image)
-        scaled = _resize_if_small(oriented)
-        processed = preprocess_image(scaled)
-        _cache_set(image_path, oriented, scaled, processed)
+
+    global _ocr_cache
+    with _cache_lock:
+        if _ocr_cache["file_path"] == image_path:
+            if _ocr_cache["words"] is not None:
+                return _ocr_cache["words"]
+        else:
+            _ocr_cache["file_path"] = image_path
+            _ocr_cache["oriented_image"] = None
+            _ocr_cache["processed_light_image"] = None
+            _ocr_cache["raw_text"] = None
+            _ocr_cache["words"] = None
+
+        if _ocr_cache["oriented_image"] is None:
+            try:
+                image = Image.open(image_path)
+                image = correct_orientation(image)
+                _ocr_cache["oriented_image"] = image
+            except Exception:
+                return []
+        else:
+            image = _ocr_cache["oriented_image"]
+
+        if _ocr_cache["processed_light_image"] is None:
+            scale = max(1, 1200 // max(image.size))
+            if scale > 1:
+                img_resized = image.resize((image.width * scale, image.height * scale), Image.LANCZOS)
+            else:
+                img_resized = image
+            processed = preprocess_image_light(img_resized)
+            _ocr_cache["processed_light_image"] = processed
+        else:
+            processed = _ocr_cache["processed_light_image"]
+
     data = pytesseract.image_to_data(processed, config="--psm 3 --oem 1", output_type=pytesseract.Output.DICT)
     words = []
     img_w, img_h = processed.size
@@ -116,14 +162,31 @@ def extract_words_from_image(image_path: str) -> list[dict]:
                 "page_w": img_w,
                 "page_h": img_h,
             })
+
+    with _cache_lock:
+        if _ocr_cache["file_path"] == image_path:
+            _ocr_cache["words"] = words
+
     return words
+
+
+def _ocr_image_to_text(image) -> str:
+    scale = max(1, 1200 // max(image.size))
+    if scale > 1:
+        image = image.resize((image.width * scale, image.height * scale), Image.LANCZOS)
+    processed = preprocess_image_light(image)
+    text = pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
+    if text:
+        return text
+    processed = preprocess_image_aggressive(image)
+    text = pytesseract.image_to_string(processed, config="--psm 6 --oem 1").strip()
+    return text
 
 
 def _ocr_pil_image(pil_image):
     try:
-        img = _resize_if_small(pil_image)
-        processed = preprocess_image(img)
-        return pytesseract.image_to_string(processed, config="--psm 3 --oem 1").strip()
+        pil_image = correct_orientation(pil_image)
+        return _ocr_image_to_text(pil_image)
     except Exception:
         return ""
 
@@ -131,7 +194,7 @@ def _ocr_pil_image(pil_image):
 def extract_text_from_pdf(pdf_path: str) -> str:
     with open_pdf(pdf_path) as pdf:
         text_parts = []
-        for page in pdf.pages[:MAX_PDF_PAGES]:
+        for page in pdf.pages:
             page_text = page.extract_text()
             if page_text and page_text.strip():
                 text_parts.append(page_text.strip())
@@ -144,15 +207,15 @@ def extract_text_from_pdf(pdf_path: str) -> str:
         return ""
 
     with open_pdf(pdf_path) as pdf:
-        pages = pdf.pages[:MAX_PDF_PAGES]
-        page_images = [page.to_image(resolution=PDF_RENDER_DPI).original for page in pages]
+        page_images = [page.to_image(resolution=120).original for page in pdf.pages]
 
     text_parts = []
-    workers = min(4, len(page_images)) if len(page_images) > 1 else 1
+    workers = min(os.cpu_count() or 2, len(page_images)) if len(page_images) > 1 else 1
     if workers > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            results = pool.map(_ocr_pil_image, page_images)
-            for text in results:
+            futures = [pool.submit(_ocr_pil_image, img) for img in page_images]
+            for f in concurrent.futures.as_completed(futures):
+                text = f.result()
                 if text:
                     text_parts.append(text)
     else:
@@ -160,9 +223,6 @@ def extract_text_from_pdf(pdf_path: str) -> str:
             text = _ocr_pil_image(img)
             if text:
                 text_parts.append(text)
-
-    if len(pdf.pages) > MAX_PDF_PAGES:
-        print(f"[OCR] Capped at {MAX_PDF_PAGES} pages (document has {len(pdf.pages)} total)")
 
     return "\n".join(text_parts).strip()
 

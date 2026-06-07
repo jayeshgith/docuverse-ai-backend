@@ -9,6 +9,7 @@ from bson import ObjectId
 
 from pathlib import Path as PathLib
 import asyncio
+import functools
 from services.database import get_db
 from services.ocr import extract_text, extract_words_from_image
 from services.ai_extractor import extract_fields
@@ -107,11 +108,33 @@ async def upload_document(
         except Exception as e:
             print(f"[WARN] ARQ enqueue failed, falling back to BackgroundTasks: {e}")
             if background_tasks:
-                background_tasks.add_task(process_document, doc["_id"], file_id, tenant_id.lower())
+                background_tasks.add_task(_run_process_document, doc["_id"], file_id, tenant_id.lower())
     elif background_tasks:
-        background_tasks.add_task(process_document, doc["_id"], file_id, tenant_id.lower())
+        background_tasks.add_task(_run_process_document, doc["_id"], file_id, tenant_id.lower())
 
     return doc
+
+
+_MAX_EXTRACTION_SECS = 120
+
+
+async def _run_process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
+    loop = asyncio.get_event_loop()
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(None, process_document, doc_id, file_id, tenant_id),
+            timeout=_MAX_EXTRACTION_SECS,
+        )
+    except asyncio.TimeoutError:
+        print(f"[TIMEOUT] process_document({doc_id}) exceeded {_MAX_EXTRACTION_SECS}s")
+        try:
+            db = get_db()
+            db.documents.update_one(
+                {"_id": ObjectId(doc_id)},
+                {"$set": {"status": "failed", "error_message": f"Extraction timed out after {_MAX_EXTRACTION_SECS}s", "updated_at": datetime.now(timezone.utc)}}
+            )
+        except Exception:
+            pass
 
 
 def process_document(doc_id: str, file_id: str, tenant_id: str = "default"):
@@ -504,9 +527,9 @@ async def upload_bulk_documents(
                     await pool.enqueue_job("process_document_job", doc_id, file_id, tenant_id.lower())
             except Exception:
                 if background_tasks:
-                    background_tasks.add_task(process_document, doc_id, file_id, tenant_id.lower())
+                    background_tasks.add_task(_run_process_document, doc_id, file_id, tenant_id.lower())
         elif background_tasks:
-            background_tasks.add_task(process_document, doc_id, file_id, tenant_id.lower())
+            background_tasks.add_task(_run_process_document, doc_id, file_id, tenant_id.lower())
 
         results.append({"filename": file.filename, "doc_id": doc_id, "status": "queued"})
 
