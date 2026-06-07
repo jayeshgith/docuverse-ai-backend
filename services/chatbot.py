@@ -1,10 +1,14 @@
 import json
 import os
 import re
-import urllib.request
+from openai import OpenAI
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "phi3:mini")
+client = None
+openai_api_key = os.environ.get("OPENAI_API_KEY")
+if openai_api_key:
+    client = OpenAI(api_key=openai_api_key)
+else:
+    print("[WARN] OPENAI_API_KEY not set. Chatbot will use regex-only fallback.")
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
@@ -53,7 +57,26 @@ def build_history_block(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _search_in_text(raw_text: str, question: str) -> str | None:
+    q_lower = question.lower()
+    for kw in re.findall(r"\w+", q_lower):
+        if len(kw) < 3:
+            continue
+        for line in raw_text.split("\n"):
+            if kw in line.lower():
+                stripped = line.strip()
+                if stripped:
+                    return stripped
+    return None
+
+
 def ask_question(raw_text: str, extracted_data: dict, question: str, history: list[dict] = None) -> str:
+    if not client:
+        fallback = _search_in_text(raw_text, question)
+        if fallback:
+            return f"Based on the document: {fallback}"
+        return "I could not find that in your document. (AI service not configured)"
+
     extracted_str = "\n".join(
         f"  {k}: {v}" for k, v in extracted_data.items() if v
     ) if extracted_data else "  (no fields extracted yet)"
@@ -63,29 +86,29 @@ def ask_question(raw_text: str, extracted_data: dict, question: str, history: li
     context = "\n\n---\n\n".join(c["text"] for c in relevant)
     history_block = build_history_block(history or [])
 
-    prompt = f"""You are a helpful document assistant for DocuVerse. Answer the user's question based ONLY on the document provided below. Be concise (1-3 sentences). If the answer is not in the document, say "I could not find that in your document."
+    system = "You are a document assistant for DocuVerse. Answer concisely (1-3 sentences) based ONLY on the provided document. If the answer is not in the document, say 'I could not find that in your document.'"
 
-Document text:
-{context}
-
-Extracted data:
-{extracted_str}"""
+    messages = [{"role": "system", "content": system}]
 
     if history_block:
-        prompt += f"\n\nRecent conversation:\n{history_block}"
+        messages.append({"role": "system", "content": f"Recent conversation:\n{history_block}"})
 
-    prompt += f"\n\nUser question: {question}"
-
-    body = json.dumps({
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-    }).encode()
+    messages.append({
+        "role": "user",
+        "content": f"Document text:\n{context}\n\nExtracted data:\n{extracted_str}\n\nQuestion: {question}"
+    })
 
     try:
-        req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read())
-            return data.get("response", "").strip()
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.0,
+            max_tokens=300,
+            timeout=15,
+        )
+        return r.choices[0].message.content.strip()
     except Exception as e:
+        fallback = _search_in_text(raw_text, question)
+        if fallback:
+            return f"Based on the document: {fallback}"
         return f"Sorry, I could not process that. Error: {str(e)}"
