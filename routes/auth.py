@@ -22,6 +22,11 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+class ProfileUpdateRequest(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    avatar_url: str | None = None
+
 class ForgotPasswordRequest(BaseModel):
     email: str
 
@@ -103,6 +108,40 @@ async def get_me(email: str = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return {"email": user["email"], "name": user["name"], "role": user.get("role", "user"), "tenant_id": user.get("tenant_id", "default")}
+
+
+@router.put("/profile")
+async def update_profile(body: ProfileUpdateRequest, email: str = Depends(get_current_user)):
+    db = get_db()
+    user = db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    update = {}
+    if body.name is not None:
+        update["name"] = body.name.strip()
+    if body.avatar_url is not None:
+        update["avatar_url"] = body.avatar_url
+
+    if update:
+        db.users.update_one({"email": email}, {"$set": update})
+
+    updated = db.users.find_one({"email": email})
+    token = create_access_token({
+        "sub": updated["email"],
+        "tenant_id": updated.get("tenant_id", "default"),
+        "role": updated.get("role", "user"),
+    })
+    return {
+        "token": token,
+        "user": {
+            "email": updated["email"],
+            "name": updated.get("name", ""),
+            "role": updated.get("role", "user"),
+            "tenant_id": updated.get("tenant_id", "default"),
+            "avatar_url": updated.get("avatar_url", ""),
+        },
+    }
 
 
 @router.post("/forgot-password")
