@@ -1,14 +1,16 @@
 import json
 import os
 import re
+import urllib.request
 from openai import OpenAI
 
-client = None
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "phi3:mini")
+
+openai_client = None
 openai_api_key = os.environ.get("OPENAI_API_KEY")
 if openai_api_key:
-    client = OpenAI(api_key=openai_api_key)
-else:
-    print("[WARN] OPENAI_API_KEY not set. Chatbot will use regex-only fallback.")
+    openai_client = OpenAI(api_key=openai_api_key)
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
@@ -17,7 +19,6 @@ CHUNK_OVERLAP = 150
 def chunk_text(text: str) -> list[dict]:
     if not text or len(text) <= CHUNK_SIZE:
         return [{"text": text, "index": 0}]
-
     chunks = []
     start = 0
     idx = 0
@@ -70,13 +71,7 @@ def _search_in_text(raw_text: str, question: str) -> str | None:
     return None
 
 
-def ask_question(raw_text: str, extracted_data: dict, question: str, history: list[dict] = None) -> str:
-    if not client:
-        fallback = _search_in_text(raw_text, question)
-        if fallback:
-            return f"Based on the document: {fallback}"
-        return "I could not find that in your document. (AI service not configured)"
-
+def _build_prompt(raw_text: str, extracted_data: dict, question: str, history: list[dict] | None) -> str:
     extracted_str = "\n".join(
         f"  {k}: {v}" for k, v in extracted_data.items() if v
     ) if extracted_data else "  (no fields extracted yet)"
@@ -86,29 +81,67 @@ def ask_question(raw_text: str, extracted_data: dict, question: str, history: li
     context = "\n\n---\n\n".join(c["text"] for c in relevant)
     history_block = build_history_block(history or [])
 
-    system = "You are a document assistant for DocuVerse. Answer concisely (1-3 sentences) based ONLY on the provided document. If the answer is not in the document, say 'I could not find that in your document.'"
+    prompt = f"""You are a helpful document assistant for DocuVerse. Answer the user's question based ONLY on the document provided below. Be concise (1-3 sentences). If the answer is not in the document, say "I could not find that in your document."
 
-    messages = [{"role": "system", "content": system}]
+Document text:
+{context}
+
+Extracted data:
+{extracted_str}"""
 
     if history_block:
-        messages.append({"role": "system", "content": f"Recent conversation:\n{history_block}"})
+        prompt += f"\n\nRecent conversation:\n{history_block}"
 
-    messages.append({
-        "role": "user",
-        "content": f"Document text:\n{context}\n\nExtracted data:\n{extracted_str}\n\nQuestion: {question}"
-    })
+    prompt += f"\n\nUser question: {question}"
+    return prompt
 
+
+def _ask_ollama(prompt: str) -> str | None:
+    body = json.dumps({
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+    }).encode()
     try:
-        r = client.chat.completions.create(
+        req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+            return data.get("response", "").strip()
+    except Exception:
+        return None
+
+
+def _ask_openai(prompt: str) -> str | None:
+    if not openai_client:
+        return None
+    try:
+        r = openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages,
+            messages=[
+                {"role": "system", "content": "You are a document assistant for DocuVerse. Answer concisely based ONLY on the provided document."},
+                {"role": "user", "content": prompt},
+            ],
             temperature=0.0,
             max_tokens=300,
             timeout=15,
         )
         return r.choices[0].message.content.strip()
-    except Exception as e:
-        fallback = _search_in_text(raw_text, question)
-        if fallback:
-            return f"Based on the document: {fallback}"
-        return f"Sorry, I could not process that. Error: {str(e)}"
+    except Exception:
+        return None
+
+
+def ask_question(raw_text: str, extracted_data: dict, question: str, history: list[dict] = None) -> str:
+    prompt = _build_prompt(raw_text, extracted_data, question, history)
+
+    answer = _ask_ollama(prompt)
+    if answer:
+        return answer
+
+    answer = _ask_openai(prompt)
+    if answer:
+        return answer
+
+    fallback = _search_in_text(raw_text, question)
+    if fallback:
+        return f"Based on the document: {fallback}"
+    return "I could not find that in your document."
