@@ -85,7 +85,7 @@ async def signup(body: SignupRequest):
     }
     db.users.insert_one(user)
     token = create_access_token({"sub": body.email.lower(), "tenant_id": tenant_id, "role": role})
-    return {"token": token, "user": {"email": user["email"], "name": user["name"], "role": role}, "tenant_id": tenant_id}
+    return {"token": token, "user": {"email": user["email"], "name": user["name"], "role": role, "avatar_url": ""}, "tenant_id": tenant_id}
 
 
 @router.post("/login")
@@ -98,7 +98,7 @@ async def login(body: LoginRequest):
     tenant_id = user.get("tenant_id", "default")
     role = user.get("role", "user")
     token = create_access_token({"sub": user["email"], "tenant_id": tenant_id, "role": role})
-    return {"token": token, "user": {"email": user["email"], "name": user["name"], "role": role}, "tenant_id": tenant_id}
+    return {"token": token, "user": {"email": user["email"], "name": user["name"], "role": role, "avatar_url": user.get("avatar_url", "")}, "tenant_id": tenant_id}
 
 
 @router.get("/me")
@@ -107,7 +107,7 @@ async def get_me(email: str = Depends(get_current_user)):
     user = db.users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"email": user["email"], "name": user["name"], "role": user.get("role", "user"), "tenant_id": user.get("tenant_id", "default")}
+    return {"email": user["email"], "name": user["name"], "role": user.get("role", "user"), "tenant_id": user.get("tenant_id", "default"), "avatar_url": user.get("avatar_url", "")}
 
 
 @router.put("/profile")
