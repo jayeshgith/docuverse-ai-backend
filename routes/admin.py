@@ -2,11 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from services.database import get_db
-<<<<<<< HEAD
-from routes.auth import get_current_user, get_current_tenant
->>>>>>> 03eac6c857c385cd943cd29d0e772ebe5516cc36
+from routes.auth import get_current_admin, get_current_tenant
 
-router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(get_current_admin)])
 
 
 class DocumentFieldSchema(BaseModel):
@@ -26,7 +24,7 @@ class DocumentConfigSchema(BaseModel):
 @router.get("/document-configs")
 async def list_document_configs(
     tenant_id: str = Depends(get_current_tenant),
-    user_email: str = Depends(get_current_user),
+    user_email: str = Depends(get_current_admin),
 ):
     db = get_db()
     # Fetch default configs first, then tenant overrides
@@ -55,7 +53,7 @@ async def list_document_configs(
 async def get_document_config(
     doc_type: str,
     tenant_id: str = Depends(get_current_tenant),
-    user_email: str = Depends(get_current_user),
+    user_email: str = Depends(get_current_admin),
 ):
     db = get_db()
     cfg = db.document_configs.find_one({
@@ -72,7 +70,7 @@ async def get_document_config(
 async def save_document_config(
     body: DocumentConfigSchema,
     tenant_id: str = Depends(get_current_tenant),
-    user_email: str = Depends(get_current_user),
+    user_email: str = Depends(get_current_admin),
 ):
     db = get_db()
 
@@ -107,7 +105,7 @@ async def update_document_config(
     doc_type: str,
     body: DocumentConfigSchema,
     tenant_id: str = Depends(get_current_tenant),
-    user_email: str = Depends(get_current_user),
+    user_email: str = Depends(get_current_admin),
 ):
     db = get_db()
 
@@ -138,7 +136,7 @@ async def update_document_config(
 async def delete_document_config(
     doc_type: str,
     tenant_id: str = Depends(get_current_tenant),
-    user_email: str = Depends(get_current_user),
+    user_email: str = Depends(get_current_admin),
 ):
     db = get_db()
     result = db.document_configs.delete_one({
