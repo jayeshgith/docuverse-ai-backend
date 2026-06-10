@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from services.database import get_db
-from routes.auth import get_current_user, get_current_tenant, get_current_admin
+<<<<<<< HEAD
+from routes.auth import get_current_user, get_current_tenant
+>>>>>>> 03eac6c857c385cd943cd29d0e772ebe5516cc36
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(get_current_user)])
 
@@ -27,17 +29,26 @@ async def list_document_configs(
     user_email: str = Depends(get_current_user),
 ):
     db = get_db()
-    # Find all configs for this tenant and the global default tenant
-    cursor = db.document_configs.find({"tenant_id": {"$in": [tenant_id.lower(), "default"]}})
-    configs_dict = {}
-    for c in cursor:
-        doc_type = c["document_type"]
-        # If there's already a tenant-specific config override, skip the default one
-        if doc_type in configs_dict and c.get("tenant_id") == "default":
-            continue
+    # Fetch default configs first, then tenant overrides
+    default_cursor = db.document_configs.find({"tenant_id": "default"})
+    tenant_cursor = db.document_configs.find({"tenant_id": tenant_id.lower()})
+
+    defaults = {}
+    for c in default_cursor:
         c["_id"] = str(c["_id"])
-        configs_dict[doc_type] = c
-    return list(configs_dict.values())
+        c["source"] = "default"
+        defaults[c["document_type"]] = c
+
+    tenant_overrides = {}
+    for c in tenant_cursor:
+        c["_id"] = str(c["_id"])
+        c["source"] = "tenant"
+        tenant_overrides[c["document_type"]] = c
+
+    # Merge: tenant overrides take precedence
+    merged = dict(defaults)
+    merged.update(tenant_overrides)
+    return list(merged.values())
 
 
 @router.get("/document-configs/{doc_type}")
